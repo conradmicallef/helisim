@@ -1,5 +1,7 @@
 # RC Heli Field
 
+**▶ Fly it in your browser: https://conradmicallef.github.io/helisim/**
+
 A 600-class flybarless RC helicopter on a flying field, seen from the pilot station. You fly it with two
 on-screen gimbals (Mode 2), the keyboard or a USB transmitter / gamepad, or let the autopilot take off,
 hold, fly racetrack laps, land or demonstrate an autorotation. Crash protection, a low-battery failsafe
