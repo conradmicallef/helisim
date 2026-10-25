@@ -1,0 +1,17 @@
+{
+  "name": "helisim-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RC Heli Field page: three.js view and HUD over the helisim wasm core",
+  "scripts": {
+    "build": "./build.sh",
+    "smoke": "node test/smoke.mjs ../rc-heli-field.html"
+  },
+  "devDependencies": {
+    "@types/three": "0.128.0",
+    "binaryen": "^123.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0",
+    "three": "0.128.0"
+  }
+}

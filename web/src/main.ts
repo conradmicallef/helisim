@@ -1,0 +1,71 @@
+// Page entry: loads the wasm core, wires buttons and keys to sim commands, and runs the frame
+// loop. Per animation frame: send input, run the elapsed fixed 240 Hz steps (at most 24, like
+// the original page), read one JSON frame, render the scene and HUD.
+
+import { Cmd, Engine, type Frame } from './engine';
+import { Input } from './input';
+import { View3D } from './view3d';
+import { Hud } from './hud';
+
+declare global { interface Window { HELI_WASM: string; heli?: { engine: Engine; frame: () => Frame | null; errors: string[] } } }
+
+const DT = 1 / 240, MAX_STEPS = 24;
+const $ = (id: string) => document.getElementById(id)!;
+
+async function start() {
+  const engine = await Engine.load(window.HELI_WASM, (Math.random() * 2 ** 32) >>> 0);
+  const send = (c: number) => engine.cmd(c);
+  const hud = new Hud();
+  const keyCmd: Record<string, number> = {
+    t: Cmd.Takeoff, k: Cmd.Circuit, g: Cmd.Land, u: Cmd.Autorot, ' ': Cmd.Arm, r: Cmd.Reset, c: Cmd.Cam, h: Cmd.Hold,
+    l: Cmd.Level, p: Cmd.Pitch, n: Cmd.Wind, x: Cmd.Protect, m: Cmd.Sensors, e: Cmd.Estimator, j: Cmd.Stunts,
+  };
+  let frame: Frame | null = null;
+  // stunt picker keys while it is open: 1-5, arrows + Enter, Esc
+  const pickerKey = (k: string): boolean => {
+    if (!frame || !frame.picker) return false;
+    const n = frame.stunts.length;
+    if (k >= '1' && k <= String(n)) { send(Cmd.StuntFirst + Number(k) - 1); return true; }
+    if (k === 'arrowdown' || k === 'arrowup') { hud.sel = (hud.sel + (k === 'arrowdown' ? 1 : n - 1)) % n; return true; }
+    if (k === 'enter') { send(Cmd.StuntFirst + hud.sel); return true; }
+    if (k === 'escape') { send(Cmd.PickerClose); return true; }
+    return false;
+  };
+  const input = new Input(send, k => { if (pickerKey(k)) return; if (k in keyCmd) send(keyCmd[k]); }, () => !!(frame && frame.picker));
+  const buttons: Record<string, number> = {
+    aTake: Cmd.Takeoff, aCirc: Cmd.Circuit, aLand: Cmd.Land, aAuto: Cmd.Autorot, aStunt: Cmd.Stunts, bArm: Cmd.Arm, bHold: Cmd.Hold,
+    bProt: Cmd.Protect, bSens: Cmd.Sensors, bEst: Cmd.Estimator, bLvl: Cmd.Level, bPitch: Cmd.Pitch, bWind: Cmd.Wind, bCam: Cmd.Cam, bReset: Cmd.Reset,
+  };
+  for (const [id, c] of Object.entries(buttons)) $(id).onclick = () => send(c);
+  $('picker').addEventListener('click', e => {
+    const b = (e.target as HTMLElement).closest('button[data-id]') as HTMLButtonElement | null;
+    if (b && !b.disabled) send(Cmd.StuntFirst + Number(b.dataset.id));
+  });
+  $('bHelp').onclick = () => { $('help').hidden = false; };
+  $('bGo').onclick = () => { $('help').hidden = true; };
+
+  const view = new View3D($('gl'));
+  let last = performance.now(), acc = 0;
+  window.heli = { engine, frame: () => frame, errors: [] };
+
+  const loop = (now: number) => {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    const i = input.read(dt);
+    engine.input(i.yaw, i.pit, i.rol, i.thrDelta, i.thrSet, i.gp);
+    acc += dt; let n = 0;
+    while (acc >= DT && n < MAX_STEPS) { acc -= DT; n++; }
+    if (n >= MAX_STEPS) acc = 0;
+    engine.step(n);
+    frame = engine.frame();
+    input.drawL(frame.stk[0], frame.stk[1]); input.drawR(frame.stk[2], frame.stk[3]);
+    view.render(frame, dt, now);
+    hud.update(frame, dt);
+    requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+}
+
+start().catch(e => {
+  console.error(e);
+  $('cue').textContent = 'Could not start the simulator: ' + (e && e.message ? e.message : String(e));
+});

@@ -1,0 +1,203 @@
+<title>RC Heli Field</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: full-bleed 3D field seen from the pilot station; transmitter-style readouts across the top, two gimbal sticks in the bottom corners (Mode 2). */
+:root{
+  --panel:rgba(24,32,38,.74); --panel-solid:#1b242b; --line:rgba(236,240,236,.16);
+  --ink:#eef1ec; --ink-dim:#a9b3ad; --accent:#ff7a1a; --armed:#ff4d3d; --cool:#4fb6ff; --good:#7fdc8a;
+  --f-display:"Barlow Condensed","Arial Narrow",system-ui,sans-serif;
+  --f-data:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+html,body{height:100%}
+body{background:#8fb7d6;color:var(--ink);font-family:var(--f-data);overflow:hidden;overscroll-behavior:none;
+  -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;touch-action:none}
+#app{position:relative;height:100%;width:100%;overflow:hidden}
+#gl{position:absolute;inset:0}
+#gl canvas{display:block;width:100%;height:100%}
+
+.top{position:absolute;top:0;left:0;right:0;padding-top:8px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  display:flex;flex-direction:column;gap:6px;pointer-events:none;z-index:2}
+.readouts{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);
+  border-radius:6px;overflow:hidden;max-width:760px}
+.r{background:var(--panel);padding:5px 8px;min-width:0}
+.r b{display:block;font:600 11px/1.2 var(--f-display);letter-spacing:.14em;color:var(--ink-dim)}
+.r span{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+.r span.warn{color:var(--accent)} .r span.bad{color:var(--armed)} .r span.ok{color:var(--good)}
+.btns{display:flex;flex-wrap:wrap;gap:6px;pointer-events:auto;max-width:800px}
+.btns button{font:600 13px/1 var(--f-display);letter-spacing:.1em;color:var(--ink);background:var(--panel);
+  border:1px solid var(--line);border-radius:5px;padding:8px 10px;cursor:pointer;min-height:34px}
+.btns button:focus-visible,.card button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.btns button i{font-style:normal;color:var(--ink-dim);margin-left:4px}
+#bArm{min-width:92px}
+.btns.auto button{border-color:rgba(79,182,255,.55);color:#d8eeff}
+.btns.auto button.on{background:var(--cool);border-color:var(--cool);color:#06192a}
+.btns.auto button.on i{color:#0d3352}
+#bArm.armed{background:var(--armed);border-color:var(--armed);color:#fff}
+#bArm.armed i{color:#ffe1dc}
+#bHold.on{background:var(--accent);border-color:var(--accent);color:#1d0f04}
+#bHold.on i{color:#5a2a06}
+#bProt.off{color:var(--ink-dim)}
+#bProt.active{animation:protFlash .5s steps(2,start) infinite;border-color:var(--armed)}
+@keyframes protFlash{to{background:var(--armed);color:#fff}}
+.cue{font:500 16px/1.3 var(--f-display);letter-spacing:.02em;max-width:760px;text-shadow:0 1px 3px rgba(0,0,0,.75)}
+.cue em{font-style:normal;color:var(--accent);font-weight:700}
+.sens{font:400 11px/1.45 var(--f-data);max-width:760px;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 8px;
+  display:flex;flex-wrap:wrap;column-gap:12px;font-variant-numeric:tabular-nums;color:var(--ink-dim)}
+.sens[hidden],.overlay[hidden]{display:none}
+.sens b{font-weight:600;color:var(--ink)} .sens .bad{color:var(--armed);font-weight:600} .sens .warn{color:var(--accent);font-weight:600}
+.sens .trs{display:inline-flex;gap:8px}
+.sens .tr{display:inline-block;width:26px;height:5px;margin-left:3px;vertical-align:middle;background:var(--line);border-radius:2px;overflow:hidden}
+.sens .tr i{display:block;height:100%;background:var(--good)} .sens .tr.warn i{background:var(--accent)} .sens .tr.bad i{background:var(--armed)}
+#bEst.off{color:var(--ink-dim)}
+@media (max-width:560px){.picker{grid-template-columns:1fr 1fr;padding:4px;gap:3px}.picker button{min-height:36px;padding:4px 6px;font-size:13px;gap:6px}
+  .picker button span small,.picker button em{display:none}.picker p{grid-column:1/-1}}
+@media (max-width:560px){.readouts{grid-template-columns:repeat(3,minmax(0,1fr))}.r span{font-size:14px}.btns button{padding:7px 8px;font-size:12px}}
+
+.bottom{position:absolute;left:0;right:0;bottom:0;z-index:2;pointer-events:none;
+  padding-bottom:calc(12px + env(safe-area-inset-bottom,0px));
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  display:flex;justify-content:space-between;align-items:flex-end;gap:12px}
+.gimbal{pointer-events:auto;display:flex;flex-direction:column;align-items:center;gap:5px}
+.gimbal label{font:600 11px/1 var(--f-display);letter-spacing:.16em;color:var(--ink);text-shadow:0 1px 2px rgba(0,0,0,.7)}
+.stick{position:relative;width:min(150px,36vw);aspect-ratio:1;max-width:100%;border-radius:14px;background:var(--panel);
+  border:1px solid var(--line);touch-action:none;cursor:grab}
+.stick::before,.stick::after{content:"";position:absolute;background:var(--line)}
+.stick::before{left:50%;top:10%;bottom:10%;width:1px}
+.stick::after{top:50%;left:10%;right:10%;height:1px}
+.knob{position:absolute;width:42px;height:42px;margin:-21px 0 0 -21px;border-radius:50%;left:50%;top:50%;
+  background:radial-gradient(circle at 40% 35%,#5a6870,#2a3439);border:2px solid var(--ink-dim);box-shadow:0 3px 8px rgba(0,0,0,.45);pointer-events:none}
+.stick.live .knob{border-color:var(--accent)}
+.thrTicks{position:absolute;right:6px;top:10%;bottom:10%;width:6px;
+  background:repeating-linear-gradient(to bottom,var(--ink-dim) 0 1px,transparent 1px 10%);opacity:.5}
+.center{pointer-events:none;text-align:center;font-size:12px;color:var(--ink);text-shadow:0 1px 2px rgba(0,0,0,.8);
+  font-variant-numeric:tabular-nums;padding-bottom:8px;min-width:0}
+.center b{display:block;font:600 11px/1.4 var(--f-display);letter-spacing:.14em;color:var(--ink-dim)}
+
+#toast{position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);z-index:3;pointer-events:none;
+  background:var(--panel-solid);border:1px solid var(--line);border-radius:8px;padding:10px 16px;
+  font:600 18px/1.25 var(--f-display);letter-spacing:.03em;text-align:center;max-width:min(360px,calc(100% - 32px));transition:opacity .35s}
+#toast small{display:block;font:400 12px/1.4 var(--f-data);color:var(--ink-dim);margin-top:3px}
+#toast.good{border-color:var(--good)} #toast.bad{border-color:var(--armed)}
+
+.overlay{position:absolute;inset:0;z-index:5;display:grid;place-items:center;background:rgba(14,20,24,.55);overflow:auto;
+  padding-block:16px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.card{width:100%;max-width:460px;background:var(--panel-solid);border:1px solid var(--line);border-radius:10px;padding:18px 18px 16px;
+  display:flex;flex-direction:column;gap:12px}
+.card h1{margin:0;font:700 34px/1 var(--f-display);letter-spacing:.02em;text-wrap:balance}
+.card h1 small{display:block;font:600 12px/1.4 var(--f-display);letter-spacing:.2em;color:var(--accent);margin-bottom:4px}
+.card p,.card li{font-size:12.5px;line-height:1.55;color:var(--ink-dim);margin:0}
+.card ol{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:3px}
+.card li b{color:var(--ink);font-weight:600}
+.map{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.map div{border:1px solid var(--line);border-radius:6px;padding:8px;font-size:12px;line-height:1.5}
+.map div b{display:block;font:600 12px/1.3 var(--f-display);letter-spacing:.14em;color:var(--accent)}
+.card .row{display:flex;gap:8px;flex-wrap:wrap}
+.card button{flex:1 1 140px;padding:12px;border-radius:7px;border:1px solid var(--accent);background:var(--accent);color:#1d0f04;
+  font:700 17px/1 var(--f-display);letter-spacing:.06em;cursor:pointer}
+.card button.alt{background:transparent;color:var(--accent)}
+.keys{font-size:11.5px;color:var(--ink-dim)}
+.picker{pointer-events:auto;max-width:420px;background:var(--panel-solid);border:1px solid rgba(79,182,255,.55);border-radius:8px;padding:6px;
+  display:grid;gap:4px}
+.picker[hidden],.sres[hidden]{display:none}
+.picker button{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:8px;text-align:left;width:100%;min-height:40px;
+  background:transparent;border:1px solid transparent;border-radius:5px;color:var(--ink);padding:6px 8px;cursor:pointer;font:600 15px/1.1 var(--f-display);letter-spacing:.04em}
+.picker button small{display:block;font:400 11px/1.3 var(--f-data);color:var(--ink-dim);letter-spacing:0}
+.picker button kbd{font:600 11px/1 var(--f-data);color:var(--cool);border:1px solid var(--line);border-radius:3px;padding:3px 5px}
+.picker button em{font:400 11px/1 var(--f-data);color:var(--good);font-style:normal}
+.picker button:hover,.picker button.sel{background:rgba(79,182,255,.14);border-color:rgba(79,182,255,.55)}
+.picker button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.picker button:disabled{opacity:.45;cursor:not-allowed}
+.picker p{margin:2px 4px;font-size:11px;color:var(--ink-dim)}
+.sres{font:400 11px/1.45 var(--f-data);max-width:760px;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 8px;
+  display:flex;flex-wrap:wrap;column-gap:12px;color:var(--ink-dim);font-variant-numeric:tabular-nums}
+.sres b{color:var(--ink);font-weight:600} .sres .sc{color:var(--good)}
+</style>
+
+<div id="app">
+  <div id="gl" aria-label="3D view of the flying field"></div>
+
+  <div class="top">
+    <div class="readouts">
+      <div class="r"><b>THROTTLE</b><span id="oThr">0%</span></div>
+      <div class="r"><b>HEADSPEED</b><span id="oRpm">0 rpm</span></div>
+      <div class="r"><b id="lAlt">ALT</b><span id="oAlt">0.0 m</span></div>
+      <div class="r"><b id="lVs">V/S</b><span id="oVs">0.0</span></div>
+      <div class="r"><b id="lSpd">SPEED</b><span id="oSpd">0.0 m/s</span></div>
+      <div class="r"><b>BATTERY</b><span id="oBat">100%</span></div>
+    </div>
+    <div class="btns">
+      <button id="bArm">DISARMED<i>SPC</i></button>
+      <button id="bHold">THR HOLD<i>H</i></button>
+      <button id="bProt">PROTECT: ON<i>X</i></button>
+      <button id="bSens">SENSORS: IDEAL<i>M</i></button>
+      <button id="bEst">ESTIMATOR: EKF<i>E</i></button>
+      <button id="bLvl">GYRO: SELF-LEVEL<i>L</i></button>
+      <button id="bPitch">PITCH: NORMAL<i>P</i></button>
+      <button id="bWind">WIND: BREEZE<i>N</i></button>
+      <button id="bCam">VIEW: PILOT<i>C</i></button>
+      <button id="bReset">RESET<i>R</i></button>
+      <button id="bHelp">HELP</button>
+    </div>
+    <div class="btns auto">
+      <button id="aTake">▲ TAKEOFF<i>T</i></button>
+      <button id="aCirc">⟲ CIRCUIT<i>K</i></button>
+      <button id="aLand">▼ LAND<i>G</i></button>
+      <button id="aAuto">↘ AUTOROTATE<i>U</i></button>
+      <button id="aStunt" aria-haspopup="true" aria-expanded="false">★ STUNTS<i>J</i></button>
+    </div>
+    <div class="picker" id="picker" hidden role="menu" aria-label="Stunts"></div>
+    <div class="sres" id="sres" hidden></div>
+    <div class="cue" id="cue">Read the briefing, then tap <em>ARM</em>.</div>
+    <div class="sens" id="sens" hidden></div>
+  </div>
+
+  <div id="toast" style="opacity:0"></div>
+
+  <div class="bottom">
+    <div class="gimbal">
+      <label>THROTTLE · YAW</label>
+      <div class="stick" id="stL" aria-label="Left stick: throttle and yaw"><div class="thrTicks"></div><div class="knob"></div></div>
+    </div>
+    <div class="center"><b>LANDINGS</b><span id="oLand">0 · best —</span><br><b>FLIGHT</b><span id="oTime">0:00</span><br><b>RESCUES</b><span id="oResc">0</span></div>
+    <div class="gimbal">
+      <label>PITCH · ROLL</label>
+      <div class="stick" id="stR" aria-label="Right stick: pitch and roll"><div class="knob"></div></div>
+    </div>
+  </div>
+
+  <div class="overlay" id="help">
+    <div class="card">
+      <h1><small>600-CLASS · FLYBARLESS · MODE 2</small>RC Heli Field</h1>
+      <p>You are standing at the flight line. The heli sits on <b style="color:var(--accent)">Pad A</b> in front of you, tail toward you. Fly it over to <b style="color:var(--cool)">Pad B</b> and set it down softly.</p>
+      <div class="map">
+        <div><b>LEFT STICK</b>Up / down: throttle and collective (stays where you leave it).<br>Left / right: yaw (tail rotor).</div>
+        <div><b>RIGHT STICK</b>Up / down: pitch forward and back.<br>Left / right: roll. Springs back to centre.</div>
+      </div>
+      <ol>
+        <li><b>Throttle fully down</b>, then tap ARM. The governor spools the head up over a few seconds.</li>
+        <li>Raise throttle slowly. It hovers at about <b>45%</b>, a little less in ground effect.</li>
+        <li>Keep the <b>tail toward you</b> while learning. Small, early corrections.</li>
+        <li>Touch down under <b>1 m/s</b> for a soft landing. More than 3 m/s, or 35° of tilt, means a blade strike.</li>
+      </ol>
+      <p>Self-level gyro returns the heli to level when you let go of the right stick. Switch to rate mode for real flybarless behaviour. 3D pitch puts zero thrust at mid-stick and allows inverted flight.</p>
+      <p><b style="color:var(--cool)">Autopilot:</b> TAKEOFF spools up, climbs to 3 m and holds a hover. CIRCUIT flies continuous laps of a racetrack in front of you at 5 m and 5 m/s until you tap LAND or touch a stick. LAND sets down on the nearest pad. AUTOROTATE climbs to 25 m, cuts the motor and glides down to a pad to show a practice autorotation. Touch any stick to take control back.</p>
+      <p><b style="color:var(--cool)">Stunts:</b> ★ STUNTS (J) opens a list: pirouette, loop, roll, flip and inverted hover (keys 1 to 5 while it is open). The autopilot climbs to a safe height, builds speed along the field for the loop and roll, switches to 3D pitch for the manoeuvre, then recovers to a hover and scores it on height lost, drift, heading and recovery time. During a stunt, crash protection ignores bank angle and only steps in if the heli gets too low, loses headspeed or the manoeuvre runs long. In REAL sensor mode the GPS antenna loses the sky upside down, so watch the estimate drift and snap back. Touch a stick to take over; if you are inverted at that moment, pitch stays on 3D.</p>
+      <p><b style="color:var(--ink)">Modelled:</b> translational lift once you are moving faster than a walk, settling with power if you sink straight down under power, the tail weathervaning in a crosswind and kicking when motor torque changes, headspeed sag at full collective and on a tired battery, autorotation with THR HOLD, and a flapping rotor disc that lags the swashplate, blows back with airspeed and couples pitch and roll.</p>
+      <p><b style="color:var(--ink)">Crash protection</b> (PROTECT, on by default) takes over if the heli over-banks, sinks fast near the ground, settles with power or loses headspeed. It levels the heli, climbs to a hover and hands back control. At 15% battery the autopilot lands on the nearest pad. At 8% it lands and will not let go.</p>
+      <p><b style="color:var(--ink)">Sensors:</b> IDEAL lets the flight controller see the true state. REAL makes it rely on a noisy gyro, accelerometer, compass, barometer, rangefinder, GPS and ESC telemetry, so hover wanders a little and the blue ghost shows where it thinks the heli is. ESTIMATOR: EKF blends them with a Kalman filter that weighs each sensor by how noisy it is, tracks gyro and barometer drift and throws out GPS jumps that don't fit (the faint ring around the ghost is its position uncertainty). BASIC is a simpler filter with fixed blending, so a GPS glitch pulls the heli off its spot.</p>
+      <p class="keys">Keys: W/S throttle · A/D yaw · arrow keys cyclic · Space arm · H throttle hold · X crash protection · M sensors · E estimator · U autorotate · J stunts (1-5 to pick) · R reset · C view · T takeoff · K circuit · G land. A USB transmitter or gamepad also works.</p>
+      <div class="row"><button id="bGo">Go to the flight line</button></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- helisim core: gzip + base64 wasm, inflated in the page with DecompressionStream -->
+<script>window.HELI_WASM = "/*WASM*/";</script>
+<script>
+/*BUNDLE*/
+</script>
