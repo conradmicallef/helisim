@@ -14,6 +14,10 @@ export interface Frame {
   rpm: number; armed: boolean; crashed: boolean; hold: boolean; simT: number;
   wind: [number, number, number];
   level: boolean; p3d: boolean; protect: boolean; real: boolean; ekf: boolean;
+  /** assists: ALT HOLD / AUTO-YAW / tail RATE settings, ALT HOLD engaged */
+  altHold: boolean; autoYaw: boolean; tailRate: boolean; ahOn: boolean;
+  /** climb bar: estimated vertical speed m/s, colour class, ALT HOLD climb-rate target (-99 none) */
+  vsi: number; vsiC: string; vsiT: number;
   /** 2-sigma horizontal uncertainty radius of the estimate in metres (0 unless REAL + EKF) */
   sig2: number;
   windName: string; cam: 'pilot' | 'chase' | 'pad';
@@ -32,7 +36,7 @@ export interface Frame {
 export const Cmd = {
   Arm: 0, Hold: 1, Protect: 2, Sensors: 3, Level: 4, Pitch: 5, Wind: 6, Cam: 7, Reset: 8,
   Takeoff: 9, Circuit: 10, Land: 11, Autorot: 12, Takeover: 13, Estimator: 14,
-  Stunts: 15, StuntFirst: 16, PickerClose: 21,
+  Stunts: 15, StuntFirst: 16, PickerClose: 21, AltHold: 22, AutoYaw: 23, TailRate: 24,
 } as const;
 
 interface Exports {

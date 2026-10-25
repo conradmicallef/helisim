@@ -185,16 +185,12 @@ impl Sim {
 
     /// One physics step on the true state. Returns the wind used (fed to the sensors).
     pub(crate) fn physics(&mut self, cmd: Option<Cmd>, dt: f64) -> V3 {
-        let p3d = self.set.pitch3d;
-        let thr = self.sticks.thr;
         let coll = if self.h.crashed {
             0.0
         } else if let Some(c) = cmd {
             c.coll
-        } else if p3d {
-            thr * 2.0 - 1.0
         } else {
-            thr
+            self.manual_coll(dt)
         };
         let h = &mut self.h;
         h.coll_cmd = coll;

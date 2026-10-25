@@ -107,6 +107,15 @@ fn write_frame(s: &mut Sim, j: &mut Json) {
     j.bool("protect", s.set.protect);
     j.bool("real", s.set.real);
     j.bool("ekf", s.set.ekf);
+    // assists: settings, ALT HOLD engaged, climb bar (v/s, colour class, ALT HOLD climb-rate target)
+    j.bool("altHold", s.set.alt_hold);
+    j.bool("autoYaw", s.set.auto_yaw);
+    j.bool("tailRate", s.set.tail_rate);
+    j.bool("ahOn", s.ah.active);
+    let (vsv, vsc) = s.vsi();
+    j.num("vsi", vsv);
+    j.str("vsiC", vsc);
+    j.num("vsiT", if s.ah.active { s.ah.vz } else { -99.0 });
     // 2-sigma horizontal uncertainty radius of the estimate (0 when not on the EKF)
     j.num("sig2", if s.set.real && s.set.ekf && s.sens.ekf.init { 2.0 * s.sens.ekf.sig_pos() } else { 0.0 });
     j.str("windName", WINDS[s.set.wind].name);

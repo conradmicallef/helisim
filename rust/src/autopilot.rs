@@ -451,6 +451,8 @@ impl Sim {
                 why = Some(format!("Over-banked {}°", to_fixed(tilt, 0)));
             } else if alt < 8.0 && vy < -2.2 && alt / -vy < 1.4 {
                 why = Some(format!("Sinking {} m/s at {} m", to_fixed(-vy, 1), to_fixed(alt, 0)));
+            } else if let Some(w) = self.ground_prox() {
+                why = Some(w);
             } else if !h.hold && vrs_of(-vu, ip, h.coll_cmd, est.rpm) > 0.5 {
                 why = Some("Settling with power".into());
             } else if est.rpm < 0.72 {
@@ -514,7 +516,7 @@ impl Sim {
 
     /// Collective that gives the wanted vertical acceleration, from the estimated state.
     #[allow(clippy::too_many_arguments)]
-    fn coll_for(&self, vz_des: f64, up: V3, rx: f64, ry: f64, rz: f64, dk: f64, kz: f64, ff_a: f64) -> f64 {
+    pub(crate) fn coll_for(&self, vz_des: f64, up: V3, rx: f64, ry: f64, rz: f64, dk: f64, kz: f64, ff_a: f64) -> f64 {
         let sp2 = rx * rx + ry * ry + rz * rz;
         let vu = rx * up.x + ry * up.y + rz * up.z;
         let ip = (sp2 - vu * vu).max(0.0).sqrt();

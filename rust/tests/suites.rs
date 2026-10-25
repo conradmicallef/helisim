@@ -16,7 +16,10 @@ struct T {
 
 impl T {
     fn new(seed: u64) -> T {
-        T { s: Sim::new(seed), t: 0.0, keys: HashSet::new() }
+        let mut s = Sim::new(seed);
+        // the JS-parity suites set raw stick positions: keep the original linear throttle curve
+        s.set.thr_curve = false;
+        T { s, t: 0.0, keys: HashSet::new() }
     }
     fn fresh(seed: u64, protect: bool, real: bool) -> T {
         let mut t = T::new(seed);
@@ -1894,4 +1897,543 @@ fn t8_stunt_sensors() {
     assert!(vib_max > 1.1 && grav_fused_hi == 0);
     assert!(!t.s.h.crashed);
     check_ekf_health(&t.s);
+}
+
+// =====================================================================================
+// ASSISTS: ground-proximity protection, ALT HOLD, throttle curve, AUTO-YAW, tail RATE
+// =====================================================================================
+use helisim::assist::{self, hover_stick, thr_curve};
+use helisim::fbl::{expo, MAX_TILT};
+
+fn expo_inv(y: f64) -> f64 {
+    let y = y.clamp(-1.0, 1.0);
+    let mut x = y;
+    for _ in 0..30 {
+        x -= (expo(x) - y) / (0.65 + 1.05 * x * x);
+    }
+    x.clamp(-1.0, 1.0)
+}
+
+/// A scripted stick pilot: looks at the true heli (as a pilot at the flight line does) and moves
+/// the sticks. Cyclic flies a velocity along a closed path (figure of eight or straight line),
+/// yaw keeps the nose on the flight path unless AUTO-YAW does it, throttle is fixed or nudged.
+struct Pilot {
+    pts: Vec<(f64, f64)>,
+    i: usize,
+    v: f64,
+    yaw: bool,
+}
+
+impl Pilot {
+    /// Figure of eight: two 7 m circles touching at (2, -13), flown at `v` m/s.
+    fn eight(v: f64) -> Pilot {
+        let (cx, cz, r) = (2.0, -13.0, 7.0);
+        let mut pts = vec![];
+        let n = 88;
+        for k in 0..n {
+            let a = k as f64 / n as f64 * 2.0 * std::f64::consts::PI;
+            pts.push((cx - r + r * a.cos(), cz - r * a.sin())); // left circle, counter-clockwise from the crossing
+        }
+        for k in 0..n {
+            let a = k as f64 / n as f64 * 2.0 * std::f64::consts::PI;
+            pts.push((cx + r - r * a.cos(), cz - r * a.sin())); // right circle, clockwise
+        }
+        Pilot { pts, i: 0, v, yaw: true }
+    }
+    /// Hold a spot.
+    fn point(x: f64, z: f64) -> Pilot {
+        Pilot { pts: vec![(x, z); 4], i: 0, v: 0.0, yaw: false }
+    }
+    /// Straight line from (x0, z0) along heading direction (dx, dz), 200 m long.
+    fn line(x0: f64, z0: f64, dx: f64, dz: f64, v: f64) -> Pilot {
+        let pts = (0..200).map(|k| (x0 + dx * k as f64, z0 + dz * k as f64)).collect();
+        Pilot { pts, i: 0, v, yaw: false }
+    }
+    fn sticks(&mut self, s: &Sim) -> (f64, f64, f64) {
+        let h = &s.h;
+        let n = self.pts.len();
+        let d2 = |i: usize| (self.pts[i].0 - h.p.x).powi(2) + (self.pts[i].1 - h.p.z).powi(2);
+        let mut bi = self.i;
+        for k in 1..10 {
+            let j = (self.i + k) % n;
+            if d2(j) < d2(bi) {
+                bi = j;
+            }
+        }
+        self.i = bi;
+        let (a, b) = (self.pts[bi], self.pts[(bi + 3) % n]);
+        let (tx, tz) = ((b.0 - a.0), (b.1 - a.1));
+        let tl = tx.hypot(tz).max(1e-9);
+        let (tx, tz) = (tx / tl, tz / tl);
+        let (ex, ez) = (h.p.x - a.0, h.p.z - a.1);
+        let (vdx, vdz) = (tx * self.v - 0.6 * ex, tz * self.v - 0.6 * ez);
+        let w = s.wind;
+        let (rx, rz) = (h.v.x - w.x, h.v.z - w.z);
+        let dk = 0.22 + 0.035 * rx.hypot(rz);
+        let (ax, az) = (1.4 * (vdx - h.v.x) + dk * rx, 1.4 * (vdz - h.v.z) + dk * rz);
+        let (fwd, right) = fwd_right(h.q);
+        let lim = 22f64.to_radians();
+        let pa = ((ax * fwd.x + az * fwd.z) / 9.81).atan().clamp(-lim, lim);
+        let ra = ((ax * right.x + az * right.z) / 9.81).atan().clamp(-lim, lim);
+        let yaw = if self.yaw && h.v.hyp_xz() > 1.5 {
+            let e = wrap((-h.v.x).atan2(-h.v.z) - heading_of(h.q));
+            (-(2.0 * e) / 4.5).clamp(-0.8, 0.8)
+        } else {
+            0.0
+        };
+        (expo_inv(pa / MAX_TILT), expo_inv(ra / MAX_TILT), expo_inv(yaw))
+    }
+}
+
+/// Step with this stick input for `sec` seconds; `f` sees the sim each step, true stops.
+fn fly(s: &mut Sim, sec: f64, mut st: impl FnMut(&Sim) -> (f64, f64, f64, Option<f64>), mut f: impl FnMut(&Sim) -> bool) -> bool {
+    let n = (sec / DT).round() as u64;
+    for i in 0..n {
+        if i % 4 == 0 {
+            let (pit, rol, yaw, thr) = st(s);
+            s.input(&Input { pit, rol, yaw, thr_set: thr, ..Input::default() });
+        }
+        s.step(DT);
+        if f(s) {
+            return true;
+        }
+    }
+    false
+}
+
+fn mode_of(s: &Sim) -> Option<Mode> {
+    s.auto.as_ref().map(|a| a.mode)
+}
+
+/// Autopilot to a hover at `alt`, then hand over to the sticks bumplessly (stick = current collective).
+fn manual_at(seed: u64, alt: f64, wind: usize, protect: bool, real: bool) -> Sim {
+    let mut s = Sim::new(seed);
+    s.set.wind = wind;
+    s.set.protect = protect;
+    if real {
+        s.command(Command::Sensors);
+    }
+    s.command(Command::Takeoff);
+    fly(&mut s, 25.0, |_| (0.0, 0.0, 0.0, None), |s| mode_of(s) == Some(Mode::Hold));
+    s.auto.as_mut().unwrap().alt = alt;
+    fly(&mut s, 20.0, |_| (0.0, 0.0, 0.0, None), |s| (s.h.alt() - alt).abs() < 0.15 && s.h.v.y.abs() < 0.15);
+    fly(&mut s, 3.0, |_| (0.0, 0.0, 0.0, None), |_| false);
+    s.command(Command::Takeover);
+    s
+}
+
+#[derive(Debug, Default)]
+struct EightRes {
+    min: f64,
+    max: f64,
+    crashed: Option<String>,
+    trig: Option<(f64, f64, String)>,
+    vmin: f64,
+    vmax: f64,
+    loss_10s: f64,
+}
+
+fn eight_run(seed: u64, alt_hold: bool, protect: bool, thr_off: f64, dur: f64, real: bool) -> EightRes {
+    let mut s = manual_at(seed, 5.0, 1, protect, real);
+    s.set.alt_hold = alt_hold;
+    let thr = s.sticks.thr + thr_off;
+    let mut p = Pilot::eight(5.5);
+    let mut r = EightRes { min: 1e9, max: -1e9, vmin: 1e9, vmax: 0.0, ..Default::default() };
+    let r0 = s.rescues;
+    let t0 = s.sim_t;
+    let mut started = false;
+    let mut a10 = None;
+    fly(
+        &mut s,
+        dur,
+        |s| {
+            if mode_of(s).is_some() {
+                return (0.0, 0.0, 0.0, None);
+            }
+            let (a, b, c) = p.sticks(s);
+            (a, b, c, Some(thr))
+        },
+        |s| {
+            let tt = s.sim_t - t0;
+            let hs = s.h.v.hyp_xz();
+            if !started && hs > 5.0 {
+                started = true;
+            }
+            if started && s.rescues == r0 {
+                r.min = r.min.min(s.h.alt());
+                r.max = r.max.max(s.h.alt());
+                r.vmin = r.vmin.min(hs);
+                r.vmax = r.vmax.max(hs);
+            }
+            if std::env::var("TRACE").is_ok() && ((tt * 240.0).round() as u64) % 120 == 0 {
+                println!("  t {tt:.1} alt {:.2} vy {:.2} hs {:.2} tilt {:.0} ay {:.2} coll {:.3}", s.h.alt(), s.h.v.y, hs, s.h.tilt_deg(), s.ay_f, s.h.coll_cmd);
+            }
+            if a10.is_none() && tt >= 10.0 {
+                a10 = Some(s.h.alt());
+            }
+            if r.trig.is_none() && s.rescues > r0 {
+                r.trig = Some((tt, s.h.alt(), s.last_toast.as_ref().map(|t| t.sub.clone()).unwrap_or_default()));
+            }
+            if s.h.crashed {
+                r.crashed = s.last_toast.as_ref().map(|t| t.sub.clone());
+                return true;
+            }
+            r.trig.is_some() && mode_of(s) == Some(Mode::Hold)
+        },
+    );
+    r.loss_10s = 5.0 - a10.unwrap_or(r.min);
+    r
+}
+
+
+/// The user's case: manual figure of eight at 5 m / 5.5 m/s on stick, self-level, no autopilot.
+#[test]
+fn t9_ground_prox_eight() {
+    for (seed, real) in [(900u64, false), (901, false), (902, true), (903, true)] {
+        let r = eight_run(seed, true, true, 0.0, 60.0, real);
+        println!(
+            "RUST ASSIST eight ALT HOLD on, {} seed {seed}: alt {:.2}-{:.2} m (band {:+.2}/{:+.2} m), speed {:.1}-{:.1} m/s, rescues {}, crashed {}",
+            if real { "REAL" } else { "IDEAL" }, r.min, r.max, r.min - 5.0, r.max - 5.0, r.vmin, r.vmax, r.trig.is_some(), r.crashed.is_some()
+        );
+        assert!(r.crashed.is_none() && r.trig.is_none());
+        assert!(r.min > 4.3 && r.max < 5.7, "{r:?}");
+    }
+    for real in [false, true] {
+        let tag = if real { "REAL" } else { "IDEAL" };
+        let r = eight_run(910, false, true, 0.0, 60.0, real);
+        let (tt, ta, why) = r.trig.clone().expect("ground proximity should trigger");
+        println!(
+            "RUST ASSIST eight {tag} ALT HOLD off, fixed hover throttle, PROTECT on: lost {:.2} m by the trigger, rescue at +{tt:.1} s at {ta:.2} m ({why}), crashed {}",
+            5.0 - ta, r.crashed.is_some()
+        );
+        assert!(why.contains("Too low and fast") && r.crashed.is_none() && ta > 0.5);
+        let r = eight_run(910, false, false, 0.0, 60.0, real);
+        println!(
+            "RUST ASSIST eight {tag} ALT HOLD off, fixed hover throttle, PROTECT off: min alt {:.2} m, crash: {}",
+            r.min, r.crashed.clone().unwrap_or("none".into())
+        );
+        assert!(r.crashed.is_some() && r.trig.is_none());
+    }
+}
+
+/// Gentle sink into the ground in forward flight: 5 m/s, -0.8 m/s from 4 m (a pilot easing down).
+fn sink_run(seed: u64, protect: bool, real: bool) -> (Option<(f64, f64, String)>, Option<String>, f64, f64) {
+    let mut s = manual_at(seed, 4.0, 0, protect, real);
+    let thr0 = s.sticks.thr;
+    let mut p = Pilot::line(0.0, 0.0, 0.0, -1.0, 5.0);
+    let (r0, mut ti) = (s.rescues, 0.0);
+    let (mut trig, mut crash, mut vs_at, mut min_a) = (None, None, 0.0, 9.0f64);
+    fly(
+        &mut s,
+        25.0,
+        |s| {
+            if mode_of(s).is_some() {
+                return (0.0, 0.0, 0.0, None);
+            }
+            let (a, b, c) = p.sticks(s);
+            // descend at 0.8 m/s once moving (PI on the throttle stick, like a pilot easing it down)
+            let vd = if s.h.v.hyp_xz() > 4.5 { -0.8 } else { 0.0 };
+            let e = vd - s.h.v.y;
+            ti += e * DT * 4.0;
+            (a, b, c, Some((thr0 + 0.05 * e + 0.04 * ti).clamp(0.0, 1.0)))
+        },
+        |s| {
+            min_a = min_a.min(s.h.alt());
+            if trig.is_none() && s.rescues > r0 {
+                trig = Some((s.h.alt(), s.h.v.hyp_xz(), s.last_toast.as_ref().unwrap().sub.clone()));
+                vs_at = s.h.v.y;
+            }
+            if s.h.crashed {
+                crash = s.last_toast.as_ref().map(|t| t.sub.clone());
+                return true;
+            }
+            trig.is_some() && mode_of(s) == Some(Mode::Hold)
+        },
+    );
+    (trig, crash, vs_at, min_a)
+}
+
+#[test]
+fn t9_gentle_sink_forward() {
+    for real in [false, true] {
+        let tag = if real { "REAL" } else { "IDEAL" };
+        for seed in [920u64, 921] {
+            let (trig, crash, vs, min_a) = sink_run(seed, true, real);
+            let (a, hs, why) = trig.clone().expect("no trigger");
+            println!("RUST ASSIST sink {tag} seed {seed} PROTECT on: trigger at {a:.2} m, {hs:.1} m/s, v/s {vs:.2} ({why}); min alt {min_a:.2} m, crashed {}", crash.is_some());
+            assert!(crash.is_none() && min_a > 0.2);
+        }
+        let (trig, crash, _, _) = sink_run(922, false, real);
+        println!("RUST ASSIST sink {tag} PROTECT off: {}", crash.clone().unwrap_or("no crash".into()));
+        assert!(trig.is_none());
+        let c = crash.expect("should crash");
+        assert!(c.contains("rollover") || c.contains("Blade strike"), "{c}");
+    }
+}
+
+/// No false triggers of the new rule (or any rule) in normal flying.
+#[test]
+fn t9_no_false_triggers() {
+    for real in [false, true] {
+        let tag = if real { "REAL" } else { "IDEAL" };
+        // autopilot LAND x3
+        let mut out = vec![];
+        for seed in 930u64..933 {
+            let mut t = T::fresh(seed, true, real);
+            t.s.set.thr_curve = true;
+            hover_at(&mut t, 5.0);
+            t.s.command(Command::Land);
+            let r = watch(&mut t, 40.0);
+            assert!(r.trig.is_none() && !t.s.h.crashed, "{tag} land {r:?}");
+            out.push(format!("{:.2}", t.s.h.last_impact));
+        }
+        println!("RUST ASSIST no-false {tag} autopilot LAND x3: 0 rescues, touchdown {} m/s", out.join(" / "));
+        // manual gentle landing x3: slow, level, a little drift
+        let mut out = vec![];
+        for (i, seed) in (940u64..943).enumerate() {
+            let mut s = manual_at(seed, 3.0, 1, true, real);
+            let thr = s.sticks.thr - 0.03;
+            let v = 0.4 * i as f64; // 0, 0.4, 0.8 m/s of forward drift
+            let mut p = Pilot::line(s.h.p.x, s.h.p.z, 0.0, -1.0, v);
+            let r0 = s.rescues;
+            fly(&mut s, 30.0, |s| { let (a, b, c) = p.sticks(s); (a, b, c, Some(thr)) }, |s| s.h.crashed || (s.h.grounded && s.h.airborne && s.h.ground_load > 0.9));
+            assert!(s.rescues == r0 && !s.h.crashed, "{tag} manual landing {seed}: {:?}", s.last_toast);
+            out.push(format!("{:.2}", s.h.last_impact));
+        }
+        println!("RUST ASSIST no-false {tag} manual gentle landing x3 (drift 0 / 0.4 / 0.8 m/s): 0 rescues, touchdown {} m/s", out.join(" / "));
+        // autorotation demo x2
+        let mut out = vec![];
+        for seed in 950u64..952 {
+            let mut t = T::fresh(seed, true, real);
+            t.s.set.thr_curve = true;
+            t.s.command(Command::Autorot);
+            t.run(150.0, |t| t.s.h.auto_result.is_some() || t.s.h.crashed);
+            assert!(t.s.rescues == 0 && !t.s.h.crashed && t.s.h.auto_result.is_some(), "{tag} autorot {:?}", t.s.last_toast);
+            out.push(format!("{:.2}", t.s.h.auto_result.as_ref().unwrap().vs));
+        }
+        println!("RUST ASSIST no-false {tag} AUTOROTATE x2: 0 rescues, touchdown {} m/s", out.join(" / "));
+    }
+    // stunts x1 each (IDEAL)
+    let mut out = vec![];
+    for k in KINDS {
+        let r = stunt_run(960 + k as u64, SMode::Ideal, k, StuntHook::default(), true);
+        assert!(r.done && r.rescues == 0 && !r.crashed, "{k:?}");
+        out.push(format!("{} {}", k.name(), r.score));
+    }
+    println!("RUST ASSIST no-false stunts x1: 0 rescues ({})", out.join(", "));
+}
+
+/// ALT HOLD: liftoff into hold, hold 3 m for 20 s, climb / descend commands, touchdown to direct.
+#[test]
+fn t9_alt_hold_handover() {
+    for (real, p3d) in [(false, false), (true, false), (false, true)] {
+        let tag = format!("{}{}", if real { "REAL" } else { "IDEAL" }, if p3d { " 3D" } else { "" });
+        let mut s = Sim::new(970);
+        if real {
+            s.command(Command::Sensors);
+        }
+        if p3d {
+            s.command(Command::Pitch);
+        }
+        s.command(Command::AltHold);
+        assert!(s.set.alt_hold);
+        s.command(Command::Arm);
+        let hs = hover_stick(p3d);
+        let mut stick = 0.0;
+        let mut jump = 0.0f64;
+        let (mut c_prev, mut act_prev) = (0.0, false);
+        let mut log: Vec<(f64, f64, bool)> = vec![];
+        let mut run = |s: &mut Sim, sec: f64, stick: f64, f: &mut dyn FnMut(&Sim) -> bool| {
+            let mut p = Pilot::point(0.0, 0.0);
+            fly(s, sec, |s| { let (a, b, c) = p.sticks(s); (a, b, c, Some(stick)) }, |s| {
+                let c = s.h.coll_cmd;
+                if s.ah.active != act_prev || s.ah.handback {
+                    jump = jump.max((c - c_prev).abs());
+                }
+                act_prev = s.ah.active;
+                c_prev = c;
+                if std::env::var("TRACE").is_ok() && log.len() % 240 == 0 {
+                    println!("  alt {:.2} vy {:.2} ah {} hb {} coll {:.3} stick {:.2} tgt {:.2}", s.h.alt(), s.h.v.y, s.ah.active, s.ah.handback, c, s.sticks.thr, s.ah.target);
+                }
+                log.push((s.h.alt(), s.h.v.y, s.ah.active));
+                f(s)
+            })
+        };
+        run(&mut s, 8.0, stick, &mut |_| false); // spool up
+        // lift off: raise the stick slowly until it is airborne and ALT HOLD engages
+        let mut t_eng = None;
+        for i in 0..400 {
+            stick = (0.3 + 0.002 * i as f64).min(hs + 0.12);
+            run(&mut s, 0.05, stick, &mut |_| false);
+            if s.ah.active {
+                t_eng = Some(s.h.alt());
+                break;
+            }
+        }
+        let eng_alt = t_eng.expect("ALT HOLD should engage after liftoff");
+        // climb to 3 m on the stick, then centre it
+        run(&mut s, 20.0, hs + 0.08 + 0.5 * (1.0 - hs - 0.08), &mut |s| s.h.alt() + 0.55 * s.h.v.y > 3.0);
+        run(&mut s, 3.0, hs, &mut |_| false);
+        let held = s.ah.target;
+        let (mut mn, mut mx) = (9.0f64, 0.0f64);
+        run(&mut s, 20.0, hs, &mut |s| { mn = mn.min(s.h.alt()); mx = mx.max(s.h.alt()); false });
+        // full up 2 s, full down 2 s
+        let mut vmax = 0.0f64;
+        run(&mut s, 2.0, 1.0, &mut |s| { vmax = vmax.max(s.h.v.y); false });
+        let mut vmin = 0.0f64;
+        run(&mut s, 2.0, 0.0, &mut |s| { vmin = vmin.min(s.h.v.y); false });
+        run(&mut s, 3.0, hs, &mut |_| false);
+        // descend to the ground on half-down stick
+        let mut td = None;
+        run(&mut s, 30.0, hs - 0.3, &mut |s| {
+            if s.h.grounded && s.h.airborne && td.is_none() {
+                td = Some(s.h.last_impact);
+            }
+            s.h.grounded && !s.ah.active && !s.ah.handback
+        });
+        let still = s.ah.active;
+        // pull the stick down: direct collective
+        run(&mut s, 2.0, 0.0, &mut |_| false);
+        let low = s.h.coll_cmd;
+        println!(
+            "RUST ASSIST althold {tag}: engaged at {eng_alt:.2} m; hold {held:.2} m for 20 s: {mn:.2}-{mx:.2} m (band {:+.2}/{:+.2}); full up {vmax:.2} m/s, full down {vmin:.2} m/s; touchdown {:.2} m/s, back to direct {}; max collective step at handover {jump:.3}",
+            mn - held, mx - held, td.unwrap_or(-1.0), !still
+        );
+        assert!(eng_alt > 0.45 && eng_alt < 1.0);
+        assert!(mx - held < 0.4 && held - mn < 0.4 && (held - 3.0).abs() < 0.3, "{mn} {mx} {held}");
+        assert!(vmax > 2.4 && vmax < 3.3 && vmin < -1.6 && vmin > -2.3, "{vmax} {vmin}");
+        assert!(td.is_some_and(|v| v < 0.8) && !still && !s.h.crashed);
+        assert!(jump < 0.05, "collective jump {jump}");
+        assert!(low <= if p3d { -0.9 } else { 0.05 });
+    }
+}
+
+#[test]
+fn t9_throttle_curve() {
+    for p3d in [false, true] {
+        let h = hover_stick(p3d);
+        let (mut prev, mut mono) = (-1.0, true);
+        for i in 0..=1000 {
+            let x = i as f64 / 1000.0;
+            let y = thr_curve(x, h);
+            mono &= y > prev;
+            prev = y;
+            assert!((assist::thr_curve_inv(y, h) - x).abs() < 1e-9);
+        }
+        let k = (thr_curve(h + 0.05, h) - thr_curve(h - 0.05, h)) / 0.1;
+        let kl = (thr_curve(0.1, h) - thr_curve(0.0, h)) / 0.1;
+        let kh = (thr_curve(1.0, h) - thr_curve(0.9, h)) / 0.1;
+        println!(
+            "RUST ASSIST curve {}: hover stick {h:.3}, f(0) {:.3} f(1) {:.3} f(h) {:.3}, slope near hover {k:.2}, below {kl:.2}, above {kh:.2}, monotonic {mono}",
+            if p3d { "3D" } else { "normal" },
+            thr_curve(0.0, h), thr_curve(1.0, h), thr_curve(h, h)
+        );
+        assert!(mono && thr_curve(0.0, h) == 0.0 && (thr_curve(1.0, h) - 1.0).abs() < 1e-12 && (thr_curve(h, h) - h).abs() < 1e-12);
+        assert!((k - 0.5).abs() < 1e-9 && kl > 1.0 && kh > 1.0);
+    }
+}
+
+fn hdg_err_air(s: &Sim) -> f64 {
+    let (vx, vz) = (s.h.v.x - s.wind.x, s.h.v.z - s.wind.z);
+    deg(wrap((-vx).atan2(-vz) - heading_of(s.h.q)))
+}
+
+#[test]
+fn t9_auto_yaw() {
+    // straight flight across a 4.5 m/s crosswind (GUSTY, from the right): fly away from the pilot
+    for on in [true, false] {
+        let mut s = manual_at(980, 6.0, 2, true, false);
+        s.set.alt_hold = true;
+        s.set.auto_yaw = on;
+        let mut p = Pilot::line(s.h.p.x, s.h.p.z, 0.0, -1.0, 5.0);
+        p.yaw = false;
+        let (mut st, mut mx) = (Stat::new(), 0.0f64);
+        let t0 = s.sim_t;
+        fly(&mut s, 14.0, |s| { let (a, b, c) = p.sticks(s); (a, b, c, Some(hover_stick(false))) }, |s| {
+            if s.sim_t - t0 > 6.0 {
+                let e = hdg_err_air(s);
+                st.add(e.abs());
+                mx = mx.max(e.abs());
+            }
+            s.h.crashed
+        });
+        println!("RUST ASSIST autoyaw {} crosswind 4.5 m/s, 5 m/s straight: heading vs air-relative velocity mean {:.1}° max {:.1}°", if on { "ON " } else { "OFF" }, st.s / st.n, mx);
+        if on {
+            assert!(st.s / st.n < 5.0, "{}", st.s / st.n);
+        } else {
+            assert!(st.s / st.n > 20.0);
+        }
+    }
+    // coordinated turn with roll only (calm): constant roll stick, pitch holds 5 m/s
+    for on in [true, false] {
+        let mut s = manual_at(981, 6.0, 0, true, false);
+        s.set.alt_hold = true;
+        s.set.auto_yaw = on;
+        let t0 = s.sim_t;
+        let mut st = Stat::new();
+        fly(
+            &mut s,
+            12.0,
+            |s| {
+                let (fwd, _) = fwd_right(s.h.q);
+                let u = s.h.v.x * fwd.x + s.h.v.z * fwd.z;
+                let pit = (0.15 * (5.0 - u) + 0.25).clamp(-0.6, 0.6);
+                let rol = if s.sim_t - t0 > 3.0 { 0.35 } else { 0.0 };
+                (expo_inv(pit), expo_inv(rol), 0.0, Some(hover_stick(false)))
+            },
+            |s| {
+                if s.sim_t - t0 > 5.0 {
+                    st.add(hdg_err_air(s).abs());
+                }
+                s.h.crashed
+            },
+        );
+        println!("RUST ASSIST autoyaw {} coordinated turn, roll stick 0.35 only: sideslip mean {:.1}° max {:.1}°", if on { "ON " } else { "OFF" }, st.s / st.n, st.mx);
+        if on {
+            assert!(st.s / st.n < 6.0);
+        } else {
+            assert!(st.s / st.n > 15.0);
+        }
+    }
+    // hover (ground speed < 2 m/s) in a 4.5 m/s wind: heading held
+    let mut s = manual_at(982, 4.0, 2, true, false);
+    s.set.alt_hold = true;
+    s.set.auto_yaw = true;
+    let h0 = heading_of(s.h.q);
+    let mut p = Pilot::point(s.h.p.x, s.h.p.z);
+    let mut mx = 0.0f64;
+    fly(&mut s, 15.0, |s| { let (a, b, c) = p.sticks(s); (a, b, c, Some(hover_stick(false))) }, |s| { mx = mx.max(deg(wrap(heading_of(s.h.q) - h0)).abs()); false });
+    println!("RUST ASSIST autoyaw ON hover in 4.5 m/s wind, 15 s: heading change max {mx:.1}°");
+    assert!(mx < 3.0);
+}
+
+#[test]
+fn t9_tail_rate() {
+    for rate in [false, true] {
+        let mut s = manual_at(990, 4.0, 2, true, false);
+        s.set.alt_hold = true;
+        s.set.tail_rate = rate;
+        let h0 = heading_of(s.h.q);
+        let mut p = Pilot::point(s.h.p.x, s.h.p.z);
+        let mut mx = 0.0f64;
+        fly(&mut s, 15.0, |s| { let (a, b, c) = p.sticks(s); (a, b, c, Some(hover_stick(false))) }, |s| { mx = mx.max(deg(wrap(heading_of(s.h.q) - h0)).abs()); false });
+        let end = deg(wrap(heading_of(s.h.q) - h0));
+        // the wind comes from the right (+x): nose into wind is heading -90
+        println!("RUST ASSIST tail {} hover, 4.5 m/s crosswind 15 s: heading max change {mx:.1}°, end {end:+.1}° (into wind -90°)", if rate { "RATE" } else { "HOLD" });
+        if rate {
+            assert!(mx > 30.0);
+        } else {
+            assert!(mx < 2.0);
+        }
+    }
+    // autopilot modes force HOLD
+    let mut t = T::fresh(991, true, false);
+    t.s.set.wind = 2;
+    t.s.set.tail_rate = true;
+    t.takeoff_hold();
+    let h0 = heading_of(t.s.h.q);
+    let mut mx = 0.0f64;
+    t.run(15.0, |t| { mx = mx.max(deg(wrap(heading_of(t.s.h.q) - h0)).abs()); false });
+    println!("RUST ASSIST tail RATE setting, autopilot hover hold: heading max change {mx:.1}°");
+    assert!(mx < 3.0);
 }

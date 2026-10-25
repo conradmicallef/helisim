@@ -337,7 +337,7 @@ impl Sim {
             if p != self.set.pitch3d {
                 let c = self.h.coll_cmd;
                 self.set.pitch3d = p;
-                self.sticks.thr = if p { clamp((c + 1.0) / 2.0, 0.0, 1.0) } else { clamp(c, 0.0, 1.0) };
+                self.sticks.thr = self.stick_of_coll(c);
             }
         }
     }

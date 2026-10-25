@@ -53,9 +53,18 @@ body{background:#8fb7d6;color:var(--ink);font-family:var(--f-data);overflow:hidd
 .sens .tr{display:inline-block;width:26px;height:5px;margin-left:3px;vertical-align:middle;background:var(--line);border-radius:2px;overflow:hidden}
 .sens .tr i{display:block;height:100%;background:var(--good)} .sens .tr.warn i{background:var(--accent)} .sens .tr.bad i{background:var(--armed)}
 #bEst.off{color:var(--ink-dim)}
+.btns button.asst.on{border-color:var(--good);color:var(--good)}
+.stkRow{display:flex;gap:5px;align-items:stretch}
+.vsi{position:relative;width:10px;border-radius:5px;background:var(--panel);border:1px solid var(--line);overflow:hidden;pointer-events:none}
+.vsi::before{content:"";position:absolute;left:0;right:0;top:50%;height:1px;background:var(--ink-dim)}
+.vsi i{position:absolute;left:1px;right:1px;background:var(--good);border-radius:2px}
+.vsi i.warn{background:var(--accent)} .vsi i.bad{background:var(--armed)}
+.vsi em{position:absolute;left:-1px;right:-1px;height:2px;margin-top:-1px;background:var(--cool);display:none}
+.vsi.ah em{display:block}
 @media (max-width:560px){.picker{grid-template-columns:1fr 1fr;padding:4px;gap:3px}.picker button{min-height:36px;padding:4px 6px;font-size:13px;gap:6px}
   .picker button span small,.picker button em{display:none}.picker p{grid-column:1/-1}}
-@media (max-width:560px){.readouts{grid-template-columns:repeat(3,minmax(0,1fr))}.r span{font-size:14px}.btns button{padding:7px 8px;font-size:12px}}
+@media (max-width:560px){.readouts{grid-template-columns:repeat(3,minmax(0,1fr))}.r span{font-size:14px}.btns button{padding:7px 8px;font-size:12px}
+  .btns{gap:4px}.btns button i{margin-left:3px}.vsi{width:8px}.stkRow{gap:3px}}
 
 .bottom{position:absolute;left:0;right:0;bottom:0;z-index:2;pointer-events:none;
   padding-bottom:calc(12px + env(safe-area-inset-bottom,0px));
@@ -137,6 +146,9 @@ body{background:#8fb7d6;color:var(--ink);font-family:var(--f-data);overflow:hidd
       <button id="bEst">ESTIMATOR: EKF<i>E</i></button>
       <button id="bLvl">GYRO: SELF-LEVEL<i>L</i></button>
       <button id="bPitch">PITCH: NORMAL<i>P</i></button>
+      <button id="bAlt" class="asst">ALT HOLD: OFF<i>Q</i></button>
+      <button id="bYaw" class="asst">AUTO-YAW: OFF<i>Y</i></button>
+      <button id="bTail" class="asst">TAIL: HOLD<i>V</i></button>
       <button id="bWind">WIND: BREEZE<i>N</i></button>
       <button id="bCam">VIEW: PILOT<i>C</i></button>
       <button id="bReset">RESET<i>R</i></button>
@@ -160,7 +172,10 @@ body{background:#8fb7d6;color:var(--ink);font-family:var(--f-data);overflow:hidd
   <div class="bottom">
     <div class="gimbal">
       <label>THROTTLE · YAW</label>
-      <div class="stick" id="stL" aria-label="Left stick: throttle and yaw"><div class="thrTicks"></div><div class="knob"></div></div>
+      <div class="stkRow">
+        <div class="stick" id="stL" aria-label="Left stick: throttle and yaw"><div class="thrTicks"></div><div class="knob"></div></div>
+        <div class="vsi" id="vsi" role="img" aria-label="Climb rate"><i id="vsiBar"></i><em id="vsiT"></em></div>
+      </div>
     </div>
     <div class="center"><b>LANDINGS</b><span id="oLand">0 · best —</span><br><b>FLIGHT</b><span id="oTime">0:00</span><br><b>RESCUES</b><span id="oResc">0</span></div>
     <div class="gimbal">
@@ -187,9 +202,10 @@ body{background:#8fb7d6;color:var(--ink);font-family:var(--f-data);overflow:hidd
       <p><b style="color:var(--cool)">Autopilot:</b> TAKEOFF spools up, climbs to 3 m and holds a hover. CIRCUIT flies continuous laps of a racetrack in front of you at 5 m and 5 m/s until you tap LAND or touch a stick. LAND sets down on the nearest pad. AUTOROTATE climbs to 25 m, cuts the motor and glides down to a pad to show a practice autorotation. Touch any stick to take control back.</p>
       <p><b style="color:var(--cool)">Stunts:</b> ★ STUNTS (J) opens a list: pirouette, loop, roll, flip and inverted hover (keys 1 to 5 while it is open). The autopilot climbs to a safe height, builds speed along the field for the loop and roll, switches to 3D pitch for the manoeuvre, then recovers to a hover and scores it on height lost, drift, heading and recovery time. During a stunt, crash protection ignores bank angle and only steps in if the heli gets too low, loses headspeed or the manoeuvre runs long. In REAL sensor mode the GPS antenna loses the sky upside down, so watch the estimate drift and snap back. Touch a stick to take over; if you are inverted at that moment, pitch stays on 3D.</p>
       <p><b style="color:var(--ink)">Modelled:</b> translational lift once you are moving faster than a walk, settling with power if you sink straight down under power, the tail weathervaning in a crosswind and kicking when motor torque changes, headspeed sag at full collective and on a tired battery, autorotation with THR HOLD, and a flapping rotor disc that lags the swashplate, blows back with airspeed and couples pitch and roll.</p>
-      <p><b style="color:var(--ink)">Crash protection</b> (PROTECT, on by default) takes over if the heli over-banks, sinks fast near the ground, settles with power or loses headspeed. It levels the heli, climbs to a hover and hands back control. At 15% battery the autopilot lands on the nearest pad. At 8% it lands and will not let go.</p>
+      <p><b style="color:var(--good)">Assists:</b> The throttle is finer around the hover point: half the usual collective per stick movement within about 12% of hover, so small corrections stay small. ALT HOLD (Q) makes the left stick a climb-rate stick in the air: centre holds height, up climbs at up to 3 m/s, down descends at up to 2 m/s (1 m/s near the ground); on the ground it is the normal throttle, so lift off as usual and it takes over above 0.5 m. AUTO-YAW (Y) turns the nose into the airflow above 3 m/s and yaws with you when you roll into a turn; your yaw stick still works on top. TAIL (V) switches the tail gyro between HOLD (heading lock) and RATE (no lock, the tail weathervanes into the wind like a basic gyro). The bar beside the left stick shows climb rate, ±3 m/s, red when sinking fast near the ground, with a blue mark for the ALT HOLD target.</p>
+      <p><b style="color:var(--ink)">Crash protection</b> (PROTECT, on by default) takes over if the heli over-banks, sinks fast near the ground, is about to touch down while moving fast or tilted, settles with power or loses headspeed. It levels the heli, climbs to a hover and hands back control. At 15% battery the autopilot lands on the nearest pad. At 8% it lands and will not let go.</p>
       <p><b style="color:var(--ink)">Sensors:</b> IDEAL lets the flight controller see the true state. REAL makes it rely on a noisy gyro, accelerometer, compass, barometer, rangefinder, GPS and ESC telemetry, so hover wanders a little and the blue ghost shows where it thinks the heli is. ESTIMATOR: EKF blends them with a Kalman filter that weighs each sensor by how noisy it is, tracks gyro and barometer drift and throws out GPS jumps that don't fit (the faint ring around the ghost is its position uncertainty). BASIC is a simpler filter with fixed blending, so a GPS glitch pulls the heli off its spot.</p>
-      <p class="keys">Keys: W/S throttle · A/D yaw · arrow keys cyclic · Space arm · H throttle hold · X crash protection · M sensors · E estimator · U autorotate · J stunts (1-5 to pick) · R reset · C view · T takeoff · K circuit · G land. A USB transmitter or gamepad also works.</p>
+      <p class="keys">Keys: W/S throttle · A/D yaw · arrow keys cyclic · Space arm · H throttle hold · X crash protection · M sensors · E estimator · U autorotate · J stunts (1-5 to pick) · R reset · C view · T takeoff · K circuit · G land · Q alt hold · Y auto-yaw · V tail gyro. A USB transmitter or gamepad also works.</p>
       <div class="row"><button id="bGo">Go to the flight line</button></div>
     </div>
   </div>

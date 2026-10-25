@@ -10,10 +10,12 @@
 //! - `sensors` + `estimator` + `ekf`: simulated sensors on their own clocks, complementary filter
 //!   (BASIC) and error-state extended Kalman filter (EKF)
 //! - `autopilot`: takeoff, hold, circuit, land, rescue, autorotation, battery failsafe
+//! - `assist`: throttle curve, ALT HOLD, AUTO-YAW, tail RATE, ground-proximity predictor
 //! - `stunt`: STUNTS (pirouette, loop, roll, flip, inverted hover) and their scoring
 //! - `sim`: world step, commands, landing grading, toasts, HUD and cue text
 //! - `jsonw`, `wasm`: frame serialisation and the page interface
 
+pub mod assist;
 pub mod autopilot;
 pub mod ekf;
 pub mod estimator;

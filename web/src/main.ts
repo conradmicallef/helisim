@@ -19,6 +19,7 @@ async function start() {
   const keyCmd: Record<string, number> = {
     t: Cmd.Takeoff, k: Cmd.Circuit, g: Cmd.Land, u: Cmd.Autorot, ' ': Cmd.Arm, r: Cmd.Reset, c: Cmd.Cam, h: Cmd.Hold,
     l: Cmd.Level, p: Cmd.Pitch, n: Cmd.Wind, x: Cmd.Protect, m: Cmd.Sensors, e: Cmd.Estimator, j: Cmd.Stunts,
+    q: Cmd.AltHold, y: Cmd.AutoYaw, v: Cmd.TailRate,
   };
   let frame: Frame | null = null;
   // stunt picker keys while it is open: 1-5, arrows + Enter, Esc
@@ -35,6 +36,7 @@ async function start() {
   const buttons: Record<string, number> = {
     aTake: Cmd.Takeoff, aCirc: Cmd.Circuit, aLand: Cmd.Land, aAuto: Cmd.Autorot, aStunt: Cmd.Stunts, bArm: Cmd.Arm, bHold: Cmd.Hold,
     bProt: Cmd.Protect, bSens: Cmd.Sensors, bEst: Cmd.Estimator, bLvl: Cmd.Level, bPitch: Cmd.Pitch, bWind: Cmd.Wind, bCam: Cmd.Cam, bReset: Cmd.Reset,
+    bAlt: Cmd.AltHold, bYaw: Cmd.AutoYaw, bTail: Cmd.TailRate,
   };
   for (const [id, c] of Object.entries(buttons)) $(id).onclick = () => send(c);
   $('picker').addEventListener('click', e => {

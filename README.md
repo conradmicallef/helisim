@@ -8,7 +8,7 @@ and a REAL sensor mode (the flight controller flies on noisy, delayed sensors) a
 This is a port of the single-file JavaScript page (`rc-heli-field.html`, three.js r128) to the same
 architecture as the circuit autopilot project: a Rust core compiled to WebAssembly owns all simulation,
 control, autopilot, sensor and rule logic, and a TypeScript page only renders, gathers input and calls
-the exports. The built page is one self-contained HTML file of about 114 KB.
+the exports. The built page is one self-contained HTML file of about 119 KB.
 
 ## Layout
 
@@ -33,6 +33,7 @@ the exports. The built page is one self-contained HTML file of about 114 KB.
 | `wind` | CALM / BREEZE / GUSTY presets and the deterministic gust pattern |
 | `heli` | rigid body, rotor aerodynamics, powertrain, battery drain, skid contact, crash detection |
 | `fbl` | rotor head (flapping disc, servos, hub moment, flapback, head bob) and the flybarless gyro: rate loop, self-level, heading-hold tail |
+| `assist` | flying assists: throttle curve, ALT HOLD, AUTO-YAW, tail RATE, ground-proximity predictor |
 | `stunt` | STUNTS: pirouette, loop, roll, flip, inverted hover; profiles, scoring, cue text |
 | `sensors` | gyro, accelerometer, magnetometer, rangefinder, barometer, GPS, ESC rpm and battery telemetry, each on its own clock |
 | `estimator` | BASIC complementary filter; `Est` is what every controller sees |
@@ -61,7 +62,7 @@ Only plain numbers cross the boundary.
 |---|---|
 | `sim_init(seed)` | new sim with a seed |
 | `sim_input(yaw, pit, rol, thrDelta, thrSet, gp, g0, g1, g2, g3)` | this frame's input; `thrSet` < 0 means the touch throttle did not move; `gp` = 1 with gamepad axes 0..3 |
-| `sim_cmd(code)` | 0 arm, 1 hold, 2 protect, 3 sensors, 4 level, 5 pitch, 6 wind, 7 cam, 8 reset, 9 takeoff, 10 circuit, 11 land, 12 autorotate, 13 takeover (a stick was touched), 14 estimator EKF / BASIC, 15 stunt picker toggle, 16..20 fly pirouette / loop / roll / flip / inverted hover, 21 close the picker (codes 0..14 unchanged) |
+| `sim_cmd(code)` | 0 arm, 1 hold, 2 protect, 3 sensors, 4 level, 5 pitch, 6 wind, 7 cam, 8 reset, 9 takeoff, 10 circuit, 11 land, 12 autorotate, 13 takeover (a stick was touched), 14 estimator EKF / BASIC, 15 stunt picker toggle, 16..20 fly pirouette / loop / roll / flip / inverted hover, 21 close the picker, 22 ALT HOLD, 23 AUTO-YAW, 24 tail HOLD / RATE (codes 0..21 unchanged) |
 | `sim_step(n)` | n fixed steps of 1/240 s |
 | `sim_frame()` | builds the JSON frame, returns its length; read it at `sim_out_ptr()` |
 
@@ -252,7 +253,7 @@ it back.
 | CIRCUIT | climbs to 5 m, joins a rounded-rectangle racetrack (x -10..14, z -20..-4, 5 m corners, ~70 m) at 5 m/s with path curvature and turn rate fed forward; lap toasts; runs until LAND or a stick touch |
 | LAND | lines up over the nearest pad to 0.3 m and 0.35 m/s, then descends at `0.45 * alt` m/s clamped to 0.35..1.1 |
 | AUTOROTATE | climbs to 25 m at an entry point 38 m upwind of the pad, runs in at 7 m/s, cuts the motor (throttle hold), glides at 6..8 m/s with collective governing rpm to 99%, flares at 6 m, cushions at a steady 5.5 m/s2 deceleration, sets down near the pad |
-| Rescue (PROTECT) | takes over on more than 55 degrees of bank (or inverted on a normal pitch curve), a sink that would hit within 1.4 s below 8 m, settling with power, or headspeed under 72% (65% / 45 degrees in an autorotation glide); rolls upright, stops the sink at full power, climbs to a hover and hands back control; hands-off for 1.5 s |
+| Rescue (PROTECT) | takes over on more than 55 degrees of bank (or inverted on a normal pitch curve), a sink that would hit within 1.4 s below 8 m, ground proximity (below), settling with power, or headspeed under 72% (65% / 45 degrees in an autorotation glide); rolls upright, stops the sink at full power, climbs to a hover and hands back control; hands-off for 1.5 s |
 | Battery failsafe | at 15% (2 s debounce) lands on the nearest pad, a stick touch takes over; at 8% forced landing that ignores sticks and keys |
 
 | STUNTS (J) | picker of five manoeuvres, below |
@@ -322,9 +323,42 @@ triggers "Too low" 2.6 s in and recovers (min 2.3..2.5 m), and a collective cut 
 recovers (min 6.4..6.7 m), in both IDEAL and REAL. With PROTECT off, both crash. Shortest-way rescue: rolled 150 deg ->
 recovers about roll (-155 deg), pitched 150 / -160 deg -> about pitch.
 
+## Flying assists (`assist`)
+
+Manual flight on a phone lost height slowly (thrust tilted in translation and turns, the ETL band, direct
+collective on a coarse touch stick) until the skids touched while moving or tilted: "Dynamic rollover"
+or "Blade strike", with crash protection silent because the sink stayed under its 2.2 m/s trigger.
+Six changes, all in Rust; the page only draws the buttons and the climb bar from the frame.
+
+| | |
+|---|---|
+| Ground-proximity protection | new PROTECT rule (estimated state, so it runs on the estimate in REAL). Predicted contact `alt + vy t + ay t^2 / 2 = 0` within a 2 s look-ahead, `ay` = vertical acceleration low-passed 0.5 s, clamped to +-1 m/s2 and only counted while sinking. Fires when contact is predicted within 2.0 s AND (horizontal speed > 2.5 m/s OR tilt > 20 deg) AND sinking faster than 0.3 m/s. Never in a normal landing (horizontal < 1.5 m/s, tilt < 15 deg, sink < 1.2 m/s), on the ground, crashed, or in TAKEOFF / LAND / rescue, the autorotation and stunt windows (they keep their own rules). Rescue as before (level, stop, climb to at least 3 m). Toast "Too low and fast: 5.3 m/s at 1.3 m" or "Too low and tilted: 31 deg at 1.2 m" |
+| Throttle curve | direct manual collective only: slope 0.5 within +-12% of stick around the hover point, linear outside, monotonic, ends unchanged. Hover point = `g / TMAX` = 0.455 of stick (normal) or 0.727 (3D). The autopilot's stick display goes through the inverse, so takeover is bumpless. (`Settings::thr_curve`, on; the JS-parity suites switch it off because they set raw stick positions) |
+| ALT HOLD (Q, `bAlt`, default off) | in the air the left stick sets climb rate: +-8% deadband around hover = hold, full up +3 m/s, full down -2 m/s, descent limited to 1.0 m/s below 1.5 m (tapering to 0.5 m/s at the skids). Collective from the autopilot vertical loop (`coll_for`: tilt, ETL, inflow, ground effect and VRS feed-forward, gain 2.5), demand slewed at 4 m/s2, height loop 1.2 /s. Centring the stick brakes to zero climb, then latches the height. On the ground the stick is the normal throttle; engages once airborne above 0.5 m, upright (up.y > 0.5) and spooled, starting from the current collective (offset bled out over 1.5 s); on touchdown, throttle hold, inverted or OFF it hands back to direct with a 1/s collective slew. Any autopilot mode suspends it |
+| Climb bar | `vsi` / `vsiC` / `vsiT` in the frame: estimated v/s, class `bad` below -2 m/s under 5 m (`warn` below -1 m/s under 4 m), and the ALT HOLD climb-rate target. TS draws a 10 px bar (8 px on phones) beside the left stick: centred zero, +-3 m/s, blue target mark |
+| AUTO-YAW (Y, `bYaw`, default off) | manual flight only, upright: yaw-rate demand `2 * (heading of the air-relative velocity - heading) + coordinated g tan(bank) / V`, blended in by smoothstep from 2 to 3 m/s of both airspeed and ground speed (a hover in wind keeps heading hold), faded out beyond 120 deg of sideslip (deliberate backward flight), limited to 2.5 rad/s. The yaw stick adds on top and fades the heading term out at half stick. Off in stunts and all autopilot modes |
+| Tail RATE (V, `bTail`, default HOLD) | manual flight only: no heading-hold integrator (it bleeds off at 8 /s), tail mixed from motor load instead (torque precompensation), so the tail weathervanes and drifts in gusts. Autopilot modes always fly HOLD |
+
+Key T stays takeoff, so the tail gyro is on V. `cargo test --release --test suites t9 -- --nocapture`:
+
+| Test | Result |
+|---|---|
+| Figure of eight on stick (two 7 m circles, 5.5 m/s, 22 deg max bank, self-level), ALT HOLD on, 60 s | IDEAL 4.99-5.00 m (x2 seeds); REAL EKF 4.72-5.28 and 4.95-5.49 m; no rescue, no crash |
+| Same, ALT HOLD off, fixed hover throttle (the user's case), PROTECT on | IDEAL: lost 3.7 m in 8.7 s, "Too low and fast: 5.3 m/s at 1.3 m", recovered. REAL: lost 3.1 m, trigger at 1.9 m, recovered |
+| Same, PROTECT off | IDEAL and REAL: crash, "Dynamic rollover: the skids caught while sliding sideways" |
+| Gentle sink: 5 m/s forward, -0.8 m/s from 4 m, PROTECT on (2 seeds) | IDEAL trigger at 1.37 m (v/s -0.58), min 1.35 m; REAL trigger at 1.57-1.58 m, min 1.55 m; no crash |
+| Gentle sink, PROTECT off | IDEAL and REAL: crash, dynamic rollover |
+| No false triggers (IDEAL and REAL each) | autopilot LAND x3 (0.35 / 0.35 / 0.35, REAL 0.40 / 0.38 / 0.36 m/s), manual gentle landing x3 with 0 / 0.4 / 0.8 m/s drift, AUTOROTATE x2 (0.42 / 0.41, REAL 0.64 / 0.59 m/s), stunts x1 each (IDEAL: 100 / 92 / 96 / 87 / 94): 0 rescues |
+| ALT HOLD handover: lift off on the stick, climb, hold 20 s, full up / down 2 s, descend to touchdown | engages at 0.52 m; hold at 3.01 m: band -0.00/+0.01 m (REAL 3.03 m: -0.05/+0.10, 3D 3.04 m: -0.00/+0.02); full up +2.94 m/s, full down -1.77 m/s (slewed); touchdown 0.58-0.62 m/s, back to direct; largest collective step at either handover 0.004 |
+| AUTO-YAW, straight 5 m/s across a 4.5 m/s crosswind | heading vs air-relative velocity mean 2.1 deg, max 5.7 deg (off: 44 deg) |
+| AUTO-YAW, coordinated turn on roll stick only | sideslip mean 0.3 deg, max 0.4 deg (off: 41 deg) |
+| AUTO-YAW, hover in 4.5 m/s wind | heading held within 1.8 deg |
+| Tail HOLD / RATE, hover in 4.5 m/s crosswind, 15 s | HOLD within 1.7 deg; RATE weathervanes 64 deg toward the wind; RATE set + autopilot hover: within 1.0 deg |
+| Throttle curve | monotonic, f(0) = 0, f(1) = 1, f(hover) = hover, slope 0.50 at hover, 1.14-1.39 outside, normal and 3D |
+
 ## Tests: Rust vs JS
 
-`cargo test --release -- --nocapture --test-threads=1` in `rust/` (30 suites: the 26 below plus 4 `t8_stunt*`; plus `tests/step.rs`, about 3.5 s; the 7 `t7_ekf_*`
+`cargo test --release -- --nocapture --test-threads=1` in `rust/` (37 suites: the 26 below plus 4 `t8_stunt*` and 7 `t9_*` assist suites; plus `tests/step.rs`, about 3.5 s; the 7 `t7_ekf_*`
 suites are the EKF vs BASIC table above) against the JS harnesses `node test*.js rc-heli-field.html` on the original page. The JS uses Math.random, the Rust
 a seeded RNG, so noisy numbers agree within noise rather than to the digit. The REAL rows now run on
 the EKF (the default); the BASIC column of the table above is the original estimator.
@@ -400,8 +434,9 @@ wasm frame JSON (mode code, toasts drained after each frame).
   three@0.128.0 build from npm because cdnjs is not reachable from the build machine. It clicks TAKEOFF,
   presses K, M, E (and the ESTIMATOR button) and G and checks hover hold, circuit, the sensor panel
   with the EKF status and test ratio bars, and a Butter-soft landing on Pad A. It opens ★ STUNTS, checks the five picker entries, flies a Pirouette from the picker to recovery
-  (cue, result panel, pitch curve restored), then flies manually (Space, W) and checks a 390 px phone viewport with the picker open: no horizontal scroll,
-  sticks and picker in view, 3-column readouts. There are no page errors.
+  (cue, result panel, pitch curve restored), then flies manually (Space, W), turns on ALT HOLD (Q) and AUTO-YAW (button), lifts off into ALT HOLD
+  and checks the climb bar beside the left stick (filled above zero, target mark), and checks a 390 px phone viewport with the picker open: no horizontal scroll,
+  sticks, climb bar (clear of the stick labels) and all buttons in view, 3-column readouts. The smoke test also toggles Q / Y / V and the three buttons. There are no page errors.
 
 The sim costs about 6.0 microseconds per 240 Hz step in wasm (Node) in REAL mode with both estimators
 running (3.4 before the EKF), and building a frame with the sensor panel takes about 30 microseconds.
@@ -426,4 +461,4 @@ submodule (rust-lang/backtrace-rs at 28ec93b5), and copied to
 missing. The `wasm` profile is opt-level z, LTO, one codegen unit, panic abort, stripped. The crate
 has no dependencies.
 
-Sizes: wasm 129 KB raw, 81 KB gzip+base64 embedded; bundle 17 KB; page 114 KB (111 KiB).
+Sizes: wasm 134 KB raw, 83 KB gzip+base64 embedded; bundle 17 KB; page 119 KB (116 KiB).

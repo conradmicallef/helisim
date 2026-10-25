@@ -24,6 +24,14 @@ pub struct Settings {
     pub real: bool,
     /// REAL mode estimator: true = EKF, false = BASIC complementary filter
     pub ekf: bool,
+    /// ALT HOLD assist: the left stick commands climb rate in the air
+    pub alt_hold: bool,
+    /// AUTO-YAW assist: nose follows the airflow above 3 m/s, coordinated turns
+    pub auto_yaw: bool,
+    /// tail gyro in rate mode (no heading-hold integrator); autopilot modes always use HOLD
+    pub tail_rate: bool,
+    /// finer throttle / collective curve around the hover point (direct manual collective only)
+    pub thr_curve: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -98,6 +106,12 @@ pub enum Command {
     StuntInverted = 20,
     /// close the stunt picker
     PickerClose = 21,
+    /// toggle ALT HOLD
+    AltHold = 22,
+    /// toggle AUTO-YAW
+    AutoYaw = 23,
+    /// toggle the tail gyro HOLD / RATE
+    TailRate = 24,
 }
 
 impl Command {
@@ -126,6 +140,9 @@ impl Command {
             19 => StuntFlip,
             20 => StuntInverted,
             21 => PickerClose,
+            22 => AltHold,
+            23 => AutoYaw,
+            24 => TailRate,
             _ => return None,
         })
     }
@@ -191,6 +208,11 @@ pub struct Sim {
     pub stunt_best: [Option<u32>; 5],
     pub stunt_last: Option<crate::stunt::StuntRes>,
     pub stunt_count: u32,
+    /// ALT HOLD controller state
+    pub ah: crate::assist::AltHold,
+    /// low-passed estimated vertical acceleration and the last vertical speed (ground-proximity predictor)
+    pub ay_f: f64,
+    pub vy_prev: f64,
 }
 
 impl Sim {
@@ -199,7 +221,8 @@ impl Sim {
             h: Heli::new(),
             est: Est::new(),
             sens: Sensors::new(),
-            set: Settings { level: true, pitch3d: false, wind: 1, cam: 0, protect: true, real: false, ekf: true },
+            set: Settings { level: true, pitch3d: false, wind: 1, cam: 0, protect: true, real: false, ekf: true,
+                alt_hold: false, auto_yaw: false, tail_rate: false, thr_curve: true },
             sticks: Sticks::default(),
             auto: None,
             auto_out: None,
@@ -221,6 +244,9 @@ impl Sim {
             stunt_best: [None; 5],
             stunt_last: None,
             stunt_count: 0,
+            ah: crate::assist::AltHold::default(),
+            ay_f: 0.0,
+            vy_prev: 0.0,
         };
         s.reset_heli();
         s
@@ -229,6 +255,9 @@ impl Sim {
     pub fn reset_heli(&mut self) {
         self.h = Heli::new();
         self.sticks.thr = 0.0;
+        self.ah = crate::assist::AltHold::default();
+        self.ay_f = 0.0;
+        self.vy_prev = 0.0;
         self.sensors_reset();
     }
 
@@ -334,6 +363,33 @@ impl Sim {
             }
             Stunts => self.picker = !self.picker,
             PickerClose => self.picker = false,
+            AltHold => {
+                self.set.alt_hold = !self.set.alt_hold;
+                let (t, sub) = if self.set.alt_hold {
+                    ("ALT HOLD on", "In the air the left stick sets climb rate: centre holds height, up climbs, down descends.")
+                } else {
+                    ("ALT HOLD off", "The left stick is direct collective again.")
+                };
+                self.toast(t, sub, "");
+            }
+            AutoYaw => {
+                self.set.auto_yaw = !self.set.auto_yaw;
+                let (t, sub) = if self.set.auto_yaw {
+                    ("AUTO-YAW on", "Above 3 m/s the nose follows the airflow and rolling into a turn yaws with it.")
+                } else {
+                    ("AUTO-YAW off", "Heading hold: the tail stays where you point it.")
+                };
+                self.toast(t, sub, "");
+            }
+            TailRate => {
+                self.set.tail_rate = !self.set.tail_rate;
+                let (t, sub) = if self.set.tail_rate {
+                    ("Tail gyro: RATE", "No heading lock: the tail weathervanes into the wind and drifts in gusts.")
+                } else {
+                    ("Tail gyro: HOLD", "Heading lock: the tail holds its heading against wind and torque.")
+                };
+                self.toast(t, sub, "");
+            }
             StuntPirouette | StuntLoop | StuntRoll | StuntFlip | StuntInverted => {
                 if let Some(k) = crate::stunt::Kind::from_idx(c as usize - StuntPirouette as usize) {
                     self.start_stunt(k);
@@ -406,6 +462,7 @@ impl Sim {
         if self.h.crashed && self.auto.is_some() {
             self.cancel_auto(false);
         }
+        self.track_ay(dt);
         self.check_battery(dt);
         self.check_protect();
         let mut cmd = None;
@@ -413,8 +470,12 @@ impl Sim {
             let c = self.auto_step(dt);
             self.auto_out = if self.auto.is_some() { Some(c) } else { None };
             if self.auto.is_some() {
-                self.sticks.thr = if self.set.pitch3d { (c.coll + 1.0) / 2.0 } else { c.coll };
+                // the throttle stick follows the autopilot (through the inverse curve: bumpless takeover)
+                self.sticks.thr = self.stick_of_coll(c.coll);
             }
+            // ALT HOLD re-engages from the collective the autopilot leaves
+            self.ah.active = false;
+            self.ah.handback = false;
             cmd = Some(c);
         }
         let wind = self.physics(cmd, dt);
@@ -466,6 +527,20 @@ impl Sim {
     }
 
     // ---------- HUD ----------
+    /// Climb bar: estimated vertical speed and its colour class ("bad" sinking faster than 2 m/s
+    /// below 5 m, "warn" faster than 1 m/s below 4 m).
+    pub fn vsi(&self) -> (f64, &'static str) {
+        let (vy, alt) = (self.est.v.y, self.est.alt);
+        let c = if !self.h.grounded && alt < 5.0 && vy < -2.0 {
+            "bad"
+        } else if !self.h.grounded && alt < 4.0 && vy < -1.0 {
+            "warn"
+        } else {
+            ""
+        };
+        (vy, c)
+    }
+
     pub fn hud(&self) -> Hud {
         let h = &self.h;
         let est = &self.est;
@@ -685,6 +760,9 @@ impl Sim {
         }
         let hov = if self.set.pitch3d { "73%" } else { "45%" };
         if h.grounded && !h.airborne {
+            if self.set.alt_hold {
+                return format!("Raise throttle slowly. It lifts off at about <em>{hov}</em>; ALT HOLD takes over above 0.5 m.");
+            }
             return format!("Raise throttle slowly. It lifts off at about <em>{hov}</em>.");
         }
         if est.bat < 0.2 {
@@ -692,7 +770,18 @@ impl Sim {
         }
         let alt = est.alt;
         if !h.grounded && alt < 3.0 && est.v.y < -1.2 {
-            return "Descending fast near the ground. <em>Add throttle</em>.".into();
+            return if self.set.alt_hold {
+                "Descending fast near the ground. <em>Add throttle</em>.".into()
+            } else {
+                "Descending fast near the ground. <em>Add throttle</em>, or try ALT HOLD (Q).".into()
+            };
+        }
+        if self.ah.active {
+            return if self.ah.vz_stick == 0.0 {
+                format!("ALT HOLD: holding <em>{} m</em>. Push the left stick up to climb, down to descend.", to_fixed(self.ah.target.max(0.0), 1))
+            } else {
+                format!("ALT HOLD: {} at <em>{} m/s</em>. Centre the left stick to hold.", if self.ah.vz_stick > 0.0 { "climbing" } else { "descending" }, to_fixed(self.ah.vz_stick.abs(), 1))
+            };
         }
         if self.goal_b {
             return if self.set.level {

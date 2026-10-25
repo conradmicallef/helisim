@@ -103,6 +103,25 @@ await new Promise(r => setTimeout(r, 3000));
 f = await fr();
 ok(`manual: Space arms (${await text('bArm')}), W throttle ${await text('oThr')}, rpm ${await text('oRpm')}`);
 if (!f.armed) fail('manual arm');
+// assists: ALT HOLD (Q) and AUTO-YAW (button), climb bar beside the left stick
+await page.keyboard.press('q');
+await page.click('#bYaw');
+await new Promise(r => setTimeout(r, 300));
+f = await fr();
+if (!f.altHold || !f.autoYaw || (await text('bAlt')) !== 'ALT HOLD: ONQ' || (await text('bYaw')) !== 'AUTO-YAW: ONY') fail('assist toggles ' + (await text('bAlt')) + ' / ' + (await text('bYaw')));
+await page.waitForFunction(() => window.heli.frame().rpm > 0.97, { timeout: 60000 });
+await page.keyboard.down('w');
+await page.waitForFunction(() => window.heli.frame().ahOn, { timeout: 30000 });
+await page.waitForFunction(() => window.heli.frame().vsi > 0.3, { timeout: 10000 });
+await page.keyboard.up('w');
+const bar = await page.evaluate(() => {
+  const v = document.getElementById('vsi').getBoundingClientRect(), b = document.getElementById('vsiBar').getBoundingClientRect(), s = document.getElementById('stL').getBoundingClientRect();
+  return { vh: v.height, bh: b.height, above: b.bottom <= v.top + v.height / 2 + 1, beside: v.left >= s.right, ah: document.getElementById('vsi').classList.contains('ah') };
+});
+if (!(bar.vh > 50 && bar.bh > 1 && bar.above && bar.beside && bar.ah)) fail('climb bar ' + JSON.stringify(bar));
+f = await fr();
+ok(`assists: Q -> ALT HOLD ON, button -> AUTO-YAW ON, W lifts off into ALT HOLD (cue "${await text('cue')}"), climb bar ${bar.bh.toFixed(0)} of ${bar.vh.toFixed(0)} px above zero beside the left stick, v/s ${f.vsi.toFixed(2)} m/s, target mark shown`);
+if (shots) await page.screenshot({ path: path.join(shots, 'desktop-althold.png') });
 
 // phone width
 const ph = await open(390, 844);
@@ -114,13 +133,17 @@ const layout = await ph.evaluate(() => ({
   sticks: [...document.querySelectorAll('.stick')].map(s => s.getBoundingClientRect().right <= innerWidth),
   cols: getComputedStyle(document.querySelector('.readouts')).gridTemplateColumns.split(' ').length,
   picker: document.getElementById('picker').getBoundingClientRect().right <= innerWidth,
+  vsi: (() => { const v = document.getElementById('vsi').getBoundingClientRect(), s = document.getElementById('stL').getBoundingClientRect();
+    const labs = [...document.querySelectorAll('.gimbal label')].map(l => l.getBoundingClientRect());
+    return v.width > 4 && v.left >= s.right && v.right <= innerWidth && labs.every(l => l.bottom <= v.top || l.left >= v.right || l.right <= v.left); })(),
+  btns: [...document.querySelectorAll('.btns button')].every(b => b.getBoundingClientRect().right <= innerWidth),
 }));
-if (layout.sw > layout.w || !layout.sticks.every(Boolean) || layout.cols !== 3 || !layout.picker) fail('phone layout ' + JSON.stringify(layout));
+if (layout.sw > layout.w || !layout.sticks.every(Boolean) || layout.cols !== 3 || !layout.picker || !layout.vsi || !layout.btns) fail('phone layout ' + JSON.stringify(layout));
 if (shots) await ph.screenshot({ path: path.join(shots, 'phone-picker.png') });
 await ph.keyboard.press('Escape');
 await ph.click('#aTake');
 await ph.waitForFunction(() => window.heli.frame().mode === 1, { timeout: 30000 });
-ok(`phone 390 px: no horizontal scroll, sticks in view, readouts ${layout.cols} columns, stunt picker fits, takeoff works`);
+ok(`phone 390 px: no horizontal scroll, sticks and climb bar in view (bar clear of the stick labels), all buttons fit, readouts ${layout.cols} columns, stunt picker fits, takeoff works`);
 if (shots) await ph.screenshot({ path: path.join(shots, 'phone-hover.png') });
 await browser.close();
 if (errors.length) fail(errors.join('\n'));

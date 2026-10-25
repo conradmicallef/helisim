@@ -33,6 +33,17 @@ export class Hud {
       `<p>${f.stuntBlocked ? 'Stunts need at least 25% battery.' : '1-5 or arrows + Enter to fly · Esc closes'}</p>`;
   }
 
+  /** climb bar beside the left stick: centred zero, +-3 m/s, ALT HOLD target mark */
+  private vsi(f: Frame) {
+    const v = Math.max(-3, Math.min(3, f.vsi)), h = Math.abs(v) / 3 * 50;
+    const bar = $('vsiBar') as HTMLElement;
+    bar.style.top = (v >= 0 ? 50 - h : 50) + '%'; bar.style.height = h + '%';
+    if (bar.className !== f.vsiC) bar.className = f.vsiC;
+    const on = f.vsiT > -90;
+    $('vsi').classList.toggle('ah', on);
+    if (on) ($('vsiT') as HTMLElement).style.top = (50 - Math.max(-3, Math.min(3, f.vsiT)) / 3 * 50) + '%';
+  }
+
   showToast(t: Toast) {
     this.toastEl.innerHTML = `${t.t}<small>${t.s}</small>`;
     this.toastEl.className = t.k || '';
@@ -67,6 +78,10 @@ export class Hud {
     label('bEst', f.ekf ? 'ESTIMATOR: EKF' : 'ESTIMATOR: BASIC'); $('bEst').classList.toggle('off', !f.real);
     label('bLvl', f.level ? 'GYRO: SELF-LEVEL' : 'GYRO: RATE');
     label('bPitch', f.p3d ? 'PITCH: 3D' : 'PITCH: NORMAL');
+    label('bAlt', f.altHold ? 'ALT HOLD: ON' : 'ALT HOLD: OFF'); $('bAlt').classList.toggle('on', f.altHold);
+    label('bYaw', f.autoYaw ? 'AUTO-YAW: ON' : 'AUTO-YAW: OFF'); $('bYaw').classList.toggle('on', f.autoYaw);
+    label('bTail', f.tailRate ? 'TAIL: RATE' : 'TAIL: HOLD'); $('bTail').classList.toggle('on', f.tailRate);
+    this.vsi(f);
     label('bWind', 'WIND: ' + f.windName);
     label('bCam', 'VIEW: ' + ({ pilot: 'PILOT', chase: 'CHASE', pad: 'PAD B' } as const)[f.cam]);
     $('aTake').classList.toggle('on', f.mode === M.takeoff || f.mode === M.hold);

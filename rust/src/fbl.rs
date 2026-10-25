@@ -127,6 +127,10 @@ impl Sim {
         let rescue = matches!(&self.auto, Some(a) if a.mode == crate::autopilot::Mode::Rescue);
         // a stunt flies body rates directly through the rate loop (Cmd::rate)
         let rate_cmd = cmd.and_then(|c| c.rate);
+        // manual-flight assists: AUTO-YAW rate and the RATE tail (autopilot modes fly HOLD)
+        let manual = cmd.is_none();
+        let ay_rate = if manual { self.auto_yaw_rate(self.sticks.yaw) } else { 0.0 };
+        let tail_rate = manual && self.set.tail_rate;
         let est_q = self.est.q;
         let wm = self.est.w;
         let est_rpm = self.est.rpm;
@@ -150,10 +154,10 @@ impl Sim {
             }
             let err = err.rot(est_q.inv());
             w_des = err * if rescue { gains::LEVEL_RESCUE } else { gains::LEVEL };
-            w_des.y = -yaw_cmd * 4.5;
+            w_des.y = -yaw_cmd * 4.5 + ay_rate;
         } else {
             let rate = 4.2; // about 240 deg/s
-            w_des = v3(-pit_cmd * rate, -yaw_cmd * 5.2, -rol_cmd * rate);
+            w_des = v3(-pit_cmd * rate, -yaw_cmd * 5.2 + ay_rate, -rol_cmd * rate);
         }
         let vb = v_rel.rot(h.q.inv()); // airflow in the body frame
         let gl = if h.grounded { (h.ground_load / 0.6).min(1.0) } else { 0.0 }; // weight on the skids
@@ -253,13 +257,18 @@ impl Sim {
 
         // ---- tail: heading-hold gyro
         let err_y = w_des.y - wm.y;
-        if gl >= 1.0 {
+        if tail_rate {
+            // rate gyro: no heading lock, the integrator bleeds off
+            h.yaw_i *= (1.0 - 8.0 * dt).max(0.0);
+        } else if gl >= 1.0 {
             h.yaw_i *= (1.0 - 2.0 * dt).max(0.0);
         } else {
             h.yaw_i = clamp(h.yaw_i + err_y * dt, -0.6, 0.6);
         }
         let tl = 45.0 * h.rpm * h.rpm;
-        let tail = clamp(22.0 * err_y + 30.0 * h.yaw_i, -tl, tl);
+        // RATE tail: torque precompensation (tail pitch mixed from motor load) instead of the lock
+        let precomp = if tail_rate { -8.0 * motor * (1.0 - gl) } else { 0.0 };
+        let tail = clamp(22.0 * err_y + 30.0 * h.yaw_i + precomp, -tl, tl);
         h.w.y += (tail + (8.0 * motor - 0.5 * vb.x) * (1.0 - gl) - 0.15 * vb.z.abs() * h.w.y) * dt;
     }
 }

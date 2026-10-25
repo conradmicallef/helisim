@@ -142,6 +142,11 @@ if (els.bCam.firstChild.textContent !== 'VIEW: CHASE') fail('camera key C: ' + e
 H.stRpointerdown({ pointerId: 1, clientX: 75, clientY: 75, preventDefault() {} }); H.stRpointerup({ pointerId: 1 });
 pump(0.5);
 if (els.aCirc.classList.set.has('on')) fail('stick touch did not cancel the circuit');
+key('q'); key('y'); key('v'); pump(0.3);
+if (els.bAlt.firstChild.textContent !== 'ALT HOLD: ON' || els.bYaw.firstChild.textContent !== 'AUTO-YAW: ON' || els.bTail.firstChild.textContent !== 'TAIL: RATE') fail('assist keys Q / Y / V');
+if (!/%/.test(els.vsiBar.style.height || '')) fail('climb bar not drawn');
+H.bAltclick(); H.bYawclick(); H.bTailclick(); pump(0.2);
+if (els.bAlt.firstChild.textContent !== 'ALT HOLD: OFF' || els.bYaw.firstChild.textContent !== 'AUTO-YAW: OFF' || els.bTail.firstChild.textContent !== 'TAIL: HOLD') fail('assist buttons');
 key('j'); pump(0.2);
 if (els.picker.hidden || !/Pirouette/.test(els.picker.innerHTML)) fail('J opens the stunt picker');
 key('Escape'); pump(0.2);
@@ -150,5 +155,5 @@ key('g'); pump(25);
 key('r'); pump(0.5);
 if (els.bArm.firstChild.textContent !== 'DISARMED' || els.toast.style.opacity !== '0') fail('reset');
 if (errors.length) fail('console errors: ' + errors.join(' | '));
-ok('DOM stub: circuit (K), sensors (M), estimator (E and button), view (C), stick takeover, stunt picker (J / Esc), land (G), reset (R): no runtime errors');
+ok('DOM stub: circuit (K), sensors (M), estimator (E and button), view (C), stick takeover, assists (Q / Y / V and buttons, climb bar), stunt picker (J / Esc), land (G), reset (R): no runtime errors');
 console.log('SMOKE PASS');
