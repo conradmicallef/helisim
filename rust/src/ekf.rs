@@ -3,15 +3,19 @@
 //! controllers read in REAL sensor mode.
 //!
 //! Nominal state: position p (world, m), velocity v (world, m/s), attitude q (body -> world),
-//! gyro bias bg (rad/s), accelerometer bias ba (m/s2), barometer offset bb (m).
-//! Error state (16): dp, dv, dtheta (world-frame rotation error, q_true = dq(dtheta) * q),
-//! dbg, dba, dbb.
+//! gyro bias bg (rad/s), accelerometer bias ba (m/s2), barometer offset bb (m), horizontal wind
+//! (world x / z, m/s).
+//! Error state (18): dp, dv, dtheta (world-frame rotation error, q_true = dq(dtheta) * q),
+//! dbg, dba, dbb, dwind.
 //!
 //! - Predict at the IMU rate (240 Hz) from the bias-corrected gyro and accelerometer.
 //! - Updates on each sensor clock: delayed GPS position + velocity (innovations taken against a
 //!   0.5 s buffer of past nominal states at the measurement time), barometer (with the offset
 //!   state, noise inflated in ground effect), rangefinder height, magnetometer heading (yaw-only
-//!   gain, noise inflated with motor current), optional gravity aiding when |f| is close to g.
+//!   gain, noise inflated with motor current), optional gravity aiding when |f| is close to g,
+//!   and body drag: the specific force across the shaft is the airframe drag `-k (v - wind)`
+//!   (ArduPilot EK3 / PX4 EKF2 style drag fusion). It ties velocity to the air-relative
+//!   velocity, so with the wind states it bounds the velocity drift when GPS is lost.
 //! - Every update is gated on its normalised innovation squared against a chi-square threshold.
 //!   GPS horizontal position rejected for more than `GPS_RESET_T` resets p/v to GPS with inflated
 //!   covariance.
@@ -24,7 +28,7 @@ use crate::math::*;
 use crate::units::{DEG, G};
 use std::collections::VecDeque;
 
-pub const N: usize = 16;
+pub const N: usize = 18;
 type Mat = [[f64; N]; N];
 type Vn = [f64; N];
 
@@ -34,6 +38,8 @@ const IT: usize = 6;
 const IBG: usize = 9;
 const IBA: usize = 12;
 const IBB: usize = 15;
+/// wind x, z (world)
+const IW: usize = 16;
 
 /// Noise and gate values. Sensor noise comes from the `sensors` models; see README for the reasoning.
 pub mod tune {
@@ -85,6 +91,21 @@ pub mod tune {
     pub const GRAV_AID: bool = true;
     pub const GRAV_N: f64 = 1.0;
     pub const GRAV_WIN: f64 = 0.25;
+    /// drag fusion: airframe drag k = DRAG_K0 + DRAG_K1 |v_air| per unit mass, calibrated 10%
+    /// low against the true 0.22 + 0.035 |v_air| (like EK3_DRAG_BCOEF set from a test flight)
+    pub const DRAG: bool = true;
+    pub const DRAG_K0: f64 = 0.20;
+    pub const DRAG_K1: f64 = 0.032;
+    /// drag measurement sigma per body axis (0.1 s mean): vibration (0.87 m/s2 per sample at
+    /// hover, ~0.25 after averaging correlated samples), disc-tilt thrust and model error
+    pub const DRAG_N: f64 = 0.35;
+    /// only with rates below this (the body frame turns during the 0.1 s mean otherwise)
+    pub const DRAG_W: f64 = 1.0;
+    /// wind random walk (m/s/sqrt s). The slow BREEZE gust (+-0.8 m/s over ~9 s) is tracked;
+    /// the fast 3 s gust term averages out. Larger values let the wind state soak up the
+    /// velocity drift it is meant to bound (0.25 was worse in the inverted-hover sweep).
+    pub const WIND_RW: f64 = 0.1;
+    pub const WIND_SIG0: f64 = 3.0;
     /// chi-square gates on the normalised innovation squared (test ratio = NIS / gate, reject > 1)
     pub const GATE_GPS_POS: f64 = 11.8; // 2 DOF, p = 0.0027 (3 sigma equivalent)
     pub const GATE_GPS_HGT: f64 = 25.0; // 1 DOF, 5 sigma
@@ -93,6 +114,7 @@ pub mod tune {
     pub const GATE_RNG: f64 = 25.0;
     pub const GATE_MAG: f64 = 16.0; // 4 sigma (compass offset with current is a bias, not noise)
     pub const GATE_GRAV: f64 = 11.3; // 3 DOF, p = 0.01
+    pub const GATE_DRAG: f64 = 13.8; // 2 DOF, p = 0.001
     /// GPS position rejected for longer than this: reset p/v to GPS
     pub const GPS_RESET_T: f64 = 2.0;
     pub const RESET_POS_SIG: f64 = 0.7;
@@ -101,6 +123,7 @@ pub mod tune {
     pub const RESET_VEL_SIG: f64 = 0.5;
 }
 use tune::*;
+
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -137,6 +160,7 @@ pub struct Health {
     pub tr_rng: f64,
     pub tr_mag: f64,
     pub tr_grav: f64,
+    pub tr_drag: f64,
     /// rejected sample counts
     pub rej_gps: u32,
     pub rej_gps_vel: u32,
@@ -144,8 +168,10 @@ pub struct Health {
     pub rej_rng: u32,
     pub rej_mag: u32,
     pub rej_grav: u32,
+    pub rej_drag: u32,
     pub fused_gps: u32,
     pub fused_grav: u32,
+    pub fused_drag: u32,
     pub resets: u32,
     pub last_reset: Option<f64>,
     /// horizontal position jump of the last reset (the autopilot shifts its targets by it)
@@ -173,6 +199,8 @@ pub struct Ekf {
     pub bg: V3,
     pub ba: V3,
     pub bb: f64,
+    /// horizontal wind estimate (world, y = 0)
+    pub wind: V3,
     /// bias-corrected body rates (what the gyro loop reads)
     pub w: V3,
     pub cov: Mat,
@@ -191,6 +219,7 @@ pub struct Ekf {
     rej_inn: VecDeque<(V3, V3)>,
     // gravity aiding accumulator
     f_sum: V3,
+    v_sum: V3,
     w_max: f64,
     n_sum: u32,
 }
@@ -319,6 +348,7 @@ fn var_lim(i: usize) -> (f64, f64) {
         6..=8 => (1e-9, 1.0),
         9..=11 => (1e-12, (5.0 * DEG) * (5.0 * DEG)),
         12..=14 => (1e-10, 4.0),
+        16..=17 => (1e-4, 100.0),
         _ => (1e-6, 100.0),
     }
 }
@@ -333,6 +363,7 @@ impl Ekf {
             bg: V3::ZERO,
             ba: V3::ZERO,
             bb: 0.0,
+            wind: V3::ZERO,
             w: V3::ZERO,
             cov: zero_m(),
             h: Health::default(),
@@ -346,6 +377,7 @@ impl Ekf {
             last_pos_pass: 0.0,
             rej_inn: VecDeque::new(),
             f_sum: V3::ZERO,
+            v_sum: V3::ZERO,
             w_max: 0.0,
             n_sum: 0,
         }
@@ -373,6 +405,7 @@ impl Ekf {
         self.v = if airborne { gps_v } else { v3(gps_v.x, 0.0, gps_v.z) };
         self.bg = V3::ZERO;
         self.ba = V3::ZERO;
+        self.wind = V3::ZERO;
         self.bb = if airborne { 0.0 } else { self.baro0.map_or(0.0, |b| b - self.p.y) };
         let mut c = zero_m();
         let d = [
@@ -392,6 +425,8 @@ impl Ekf {
             0.05 * 0.05,
             0.05 * 0.05,
             0.5 * 0.5,
+            WIND_SIG0 * WIND_SIG0,
+            WIND_SIG0 * WIND_SIG0,
         ];
         for i in 0..N {
             c[i][i] = d[i];
@@ -501,6 +536,8 @@ impl Ekf {
             np[IBA + i][IBA + i] += ACC_BIAS_RW * ACC_BIAS_RW * dt;
         }
         np[IBB][IBB] += BARO_RW * BARO_RW * dt;
+        np[IW][IW] += WIND_RW * WIND_RW * dt;
+        np[IW + 1][IW + 1] += WIND_RW * WIND_RW * dt;
         self.cov = np;
         self.condition();
         // history for delayed GPS fusion
@@ -515,15 +552,21 @@ impl Ekf {
         // gravity aiding accumulator (0.1 s)
         if GRAV_AID {
             self.f_sum += accel;
+            self.v_sum += self.v;
             self.w_max = self.w_max.max(w.length());
             self.n_sum += 1;
             if self.n_sum >= 24 {
-                let fm = self.f_sum * (1.0 / self.n_sum as f64);
+                let k = 1.0 / self.n_sum as f64;
+                let (fm, vm) = (self.f_sum * k, self.v_sum * k);
                 let wm = self.w_max;
                 self.f_sum = V3::ZERO;
+                self.v_sum = V3::ZERO;
                 self.n_sum = 0;
                 self.w_max = 0.0;
                 self.gravity(fm, wm);
+                if DRAG {
+                    self.drag(fm, vm, wm, rpm);
+                }
             }
         }
         if !self.finite() {
@@ -533,7 +576,7 @@ impl Ekf {
 
     fn finite(&self) -> bool {
         let s = self.p.x + self.p.y + self.p.z + self.v.x + self.v.y + self.v.z + self.q.x + self.q.y + self.q.z + self.q.w;
-        let s = s + self.bg.x + self.bg.y + self.bg.z + self.ba.x + self.ba.y + self.ba.z + self.bb;
+        let s = s + self.bg.x + self.bg.y + self.bg.z + self.ba.x + self.ba.y + self.ba.z + self.bb + self.wind.x + self.wind.z;
         if !s.is_finite() {
             return false;
         }
@@ -577,6 +620,7 @@ impl Ekf {
         self.bg += v3(dx[IBG], dx[IBG + 1], dx[IBG + 2]);
         self.ba += v3(dx[IBA], dx[IBA + 1], dx[IBA + 2]);
         self.bb += dx[IBB];
+        self.wind += v3(dx[IW], 0.0, dx[IW + 1]);
         let (dp, dv) = (v3(dx[IP], dx[IP + 1], dx[IP + 2]), v3(dx[IV], dx[IV + 1], dx[IV + 2]));
         for hh in self.hist.iter_mut() {
             hh.p += dp;
@@ -742,6 +786,69 @@ impl Ekf {
         self.fuse_seq(&hs, &ys, &rs, &[IT + 1]);
     }
 
+    /// Drag fusion from the 0.1 s mean specific force and velocity: across the shaft (body x and
+    /// z) the accelerometer sees only the airframe drag `-k (v - wind)` (thrust and disc damping
+    /// act along the shaft, gravity is not sensed). Only airborne, spooled up and at low rates.
+    fn drag(&mut self, fm: V3, vm: V3, wmax: f64, rpm: f64) {
+        if wmax > DRAG_W || rpm < 0.8 || self.p.y < 1.0 {
+            return;
+        }
+        let qi = self.q.inv();
+        let u = v3(vm.x - self.wind.x, vm.y, vm.z - self.wind.z);
+        let um = u.length();
+        let k = DRAG_K0 + DRAG_K1 * um;
+        // world drag f_w = -k(|u|) u; J = d f_w / d u = -(k I + K1 u u' / |u|)
+        let mut jm = [[0.0f64; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                let uu = if um > 1e-6 { DRAG_K1 * comp(u, i) * comp(u, j) / um } else { 0.0 };
+                jm[i][j] = -(if i == j { k } else { 0.0 } + uu);
+            }
+        }
+        let fw = u * -k;
+        let rt: [V3; 3] = [e(0).rot(qi), e(1).rot(qi), e(2).rot(qi)]; // R' e_j: columns of R'
+        let skf = skew(fw);
+        let pred = fw.rot(qi) + self.ba;
+        let mut hs = [[0.0; N]; 2];
+        let mut ys = [0.0; 2];
+        for (r, &bi) in [0usize, 2].iter().enumerate() {
+            // row bi of R'
+            let rrow = [comp(rt[0], bi), comp(rt[1], bi), comp(rt[2], bi)];
+            for j in 0..3 {
+                let (mut dvj, mut dtj) = (0.0, 0.0);
+                for m in 0..3 {
+                    dvj += rrow[m] * jm[m][j];
+                    dtj += rrow[m] * skf[m][j];
+                }
+                hs[r][IV + j] = dvj;
+                hs[r][IT + j] = dtj;
+            }
+            // wind enters with -J (horizontal components only)
+            hs[r][IW] = -hs[r][IV];
+            hs[r][IW + 1] = -hs[r][IV + 2];
+            hs[r][IBA + bi] = 1.0;
+            ys[r] = comp(fm, bi) - comp(pred, bi);
+        }
+        let rd = DRAG_N * (1.0 + (self.vib - 1.0).max(0.0));
+        let rs = [rd * rd; 2];
+        let tr = nis(&self.cov, &hs, &ys, &rs) / GATE_DRAG;
+        self.h.tr_drag = tr;
+        if tr > 1.0 {
+            self.h.rej_drag += 1;
+            return;
+        }
+        self.h.fused_drag += 1;
+        if self.h.gps_lost {
+            // dead reckoning: drag is the only horizontal velocity reference left, let it
+            // correct velocity, tilt, gyro and accel bias (never heading)
+            self.fuse_seq(&hs, &ys, &rs, &[IT + 1]);
+        } else {
+            // with GPS the drag model only learns the wind (and nudges velocity / accel bias):
+            // its model error (disc tilt, flapback) must not tilt the attitude in normal flight
+            self.fuse_seq(&hs, &ys, &rs, &[IT, IT + 1, IT + 2, IBG, IBG + 1, IBG + 2, IBA, IBA + 1, IBA + 2]);
+        }
+    }
+
     fn hist_at(&self, tm: f64) -> Option<Hist> {
         let mut best: Option<Hist> = None;
         for hh in self.hist.iter() {
@@ -905,6 +1012,13 @@ impl Ekf {
     }
     pub fn sig_tilt_z(&self) -> f64 {
         self.cov[IT + 2][IT + 2].sqrt()
+    }
+    /// 1-sigma horizontal velocity (m/s), larger of the two axes.
+    pub fn sig_vel(&self) -> f64 {
+        self.cov[IV][IV].max(self.cov[IV + 2][IV + 2]).sqrt()
+    }
+    pub fn sig_wind(&self) -> f64 {
+        self.cov[IW][IW].max(self.cov[IW + 1][IW + 1]).sqrt()
     }
     pub fn sig_hdg(&self) -> f64 {
         self.cov[IT + 1][IT + 1].sqrt()

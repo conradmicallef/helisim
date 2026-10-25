@@ -8,7 +8,7 @@ and a REAL sensor mode (the flight controller flies on noisy, delayed sensors) a
 This is a port of the single-file JavaScript page (`rc-heli-field.html`, three.js r128) to the same
 architecture as the circuit autopilot project: a Rust core compiled to WebAssembly owns all simulation,
 control, autopilot, sensor and rule logic, and a TypeScript page only renders, gathers input and calls
-the exports. The built page is one self-contained HTML file of about 119 KB.
+the exports. The built page is one self-contained HTML file of about 120 KB.
 
 ## Layout
 
@@ -16,6 +16,7 @@ the exports. The built page is one self-contained HTML file of about 119 KB.
 |---|---|
 | `rust/` | crate `helisim`: lib (rlib + cdylib) and a native `helisim` bin for quick runs |
 | `rust/tests/suites.rs` | native ports of the JS harnesses test.js .. test5.js, with asserts |
+| `rust/examples/` | `stunt_dev` (trace one stunt), `inv_diag` (per-seed EKF diagnostics through a stunt: bias, tilt, velocity errors, fusion counts) |
 | `web/page.html` | all CSS and DOM of the original page, three.js r128 from cdnjs, `/*WASM*/` and `/*BUNDLE*/` placeholders |
 | `web/src/` | TypeScript UI (below) |
 | `web/build.sh` | Rust -> wasm32, wasm-opt, tsc, esbuild, embed -> `rc-heli-field.html` |
@@ -37,7 +38,7 @@ the exports. The built page is one self-contained HTML file of about 119 KB.
 | `stunt` | STUNTS: pirouette, loop, roll, flip, inverted hover; profiles, scoring, cue text |
 | `sensors` | gyro, accelerometer, magnetometer, rangefinder, barometer, GPS, ESC rpm and battery telemetry, each on its own clock |
 | `estimator` | BASIC complementary filter; `Est` is what every controller sees |
-| `ekf` | error-state extended Kalman filter (default in REAL mode), fixed-size 16-state matrix code, gating, GPS reset, health |
+| `ekf` | error-state extended Kalman filter (default in REAL mode), fixed-size 18-state matrix code, drag fusion with wind states, gating, GPS reset, health |
 | `autopilot` | takeoff, hold, circuit path follower, land, rescue, autorotation, battery failsafe |
 | `sim` | world step, commands, landing grading, toasts as an event list, HUD, cue and sensor-panel text |
 | `jsonw` | tiny JSON writer and JS-style `toFixed` (no serde_json, no core::fmt float code) |
@@ -173,19 +174,21 @@ matched against a 0.5 s history of past estimates with a soft innovation gate ag
 ### EKF (default)
 
 `rust/src/ekf.rs`, an error-state (indirect) extended Kalman filter in the style of a small ArduPilot
-EKF / PX4 ECL. No dependencies: 16x16 arrays, a sparse F P F' product and a 3x3 elimination for the
-innovation tests. It adds about 2.6 microseconds per 240 Hz step in wasm (6.0 against 3.4).
+EKF / PX4 ECL. No dependencies: 18x18 arrays, a sparse F P F' product and a 3x3 elimination for the
+innovation tests. It adds about 3 microseconds per 240 Hz step in wasm (the two wind states and drag
+fusion add about 1 microsecond to the 16-state filter; step timings on the build machine vary 8..13 microseconds run to run).
 
 | | |
 |---|---|
-| Nominal state | position, velocity (world), attitude quaternion, gyro bias, accelerometer bias, baro offset |
-| Error state (16) | dp, dv, dtheta (world-frame rotation error), dbg, dba, dbaro |
+| Nominal state | position, velocity (world), attitude quaternion, gyro bias, accelerometer bias, baro offset, horizontal wind |
+| Error state (18) | dp, dv, dtheta (world-frame rotation error), dbg, dba, dbaro, dwind (x, z) |
 | Predict, 240 Hz | bias-corrected gyro and specific force rotated to world plus gravity; F = I + A dt with the [f]x and -R couplings; Q from the sensor models |
 | GPS, 10 Hz | position and velocity measured 150 ms earlier: innovations are formed against a 0.5 s buffer of past nominal states at the measurement time; the correction applies to the current state and is also applied to the buffer |
 | Barometer, 25 Hz | height + offset state; noise inflated while the disc is in ground effect (< 1.4 m) |
 | Rangefinder, 20 Hz | slant range converted with the filter's own attitude, tilt < 25 deg, 0.05..4 m, flat terrain y = 0 |
 | Magnetometer, 50 Hz | yaw-only fusion (no gain into roll / pitch), compass-motor compensation 3.6 deg per unit motor load (10% under the real 4 deg), residual noise inflated with load |
 | Gravity aiding, 10 Hz | 0.1 s mean specific force against R' g, only when the magnitude is within 0.25 m/s2 of g and rates are under 0.35 rad/s; updates tilt and accel bias, not heading |
+| Drag, 10 Hz | 0.1 s mean specific force across the shaft (body x, z) against the airframe drag `-k (v - wind)` rotated to the body, k = 0.20 + 0.032 \|v_air\| (10% under the true 0.22 + 0.035); airborne above 1 m, spooled, rates under 1 rad/s; sigma 0.35 m/s2, inflated with vibration; NIS gate 13.8 (2 DOF). With GPS it only updates velocity and the wind states. While GPS is lost it also corrects tilt and gyro / accel bias (never heading). This is ArduPilot EK3 / PX4 EKF2 drag fusion, see below |
 | Updates | sequential scalar updates, Joseph form `(I-KH) P (I-KH)' + K R K'`, error state injected into the nominal state after each, symmetry enforced and variance limits applied after every predict and update |
 | Gating | normalised innovation squared against a chi-square gate on every update; test ratio = NIS / gate, > 1 rejected |
 | GPS reset | horizontal position rejected for more than 2 s: position and velocity jump by the mean of the last 5 rejected innovations, covariance reset to 0.7 m / 0.5 m/s 1-sigma. The autopilot shifts its anchor and autorotation entry point by the same jump (like ArduCopter's EKF xy-reset handling), so the heli does not fly to the new estimate |
@@ -210,7 +213,9 @@ Tuning (`ekf::tune`), all 1-sigma:
 | rangefinder | 0.05 m | 0.02 m |
 | compass | 1.2 deg + 1.5 deg x load | 0.9 deg + 4 deg x motor |
 | gravity aiding | 1.0 m/s2 | |
-| gates (NIS) | GPS position 11.8 (2 DOF, 3-sigma), velocity 21.1 (3 DOF), height 25, baro 25, range 25, compass 16, gravity 11.3 (3 DOF) | |
+| drag | 0.35 m/s2 per body axis, x (1 + vibration above hover) | 0.87 m/s2 vibration per sample, averaged over 0.1 s, plus disc-tilt thrust and the 10% drag-model error |
+| wind random walk | 0.1 m/s/sqrt(s), initial 3 m/s | slow BREEZE gust +-0.8 m/s over ~9 s; the 3 s gust term averages out |
+| gates (NIS) | GPS position 11.8 (2 DOF, 3-sigma), velocity 21.1 (3 DOF), height 25, baro 25, range 25, compass 16, gravity 11.3 (3 DOF), drag 13.8 (2 DOF) | |
 
 ### EKF vs BASIC
 
@@ -219,31 +224,105 @@ estimators (means over all samples of all 5 runs, max in brackets).
 
 | Scenario | EKF | BASIC |
 |---|---|---|
-| Hover 60 s: est pos error | 0.44 (0.96) m | 0.46 (1.34) m |
-| Hover: altitude / tilt / heading error | 0.009 (0.04) m / 0.34 (1.22) deg / 0.15 (0.66) deg | 0.016 (0.11) m / 0.56 (2.17) deg / 1.55 (2.24) deg |
-| Hover: true wander from anchor | 0.45 (0.98) m | 0.48 (1.34) m |
-| Circuit 3 laps: est pos error | 0.40 (0.79) m | 0.63 (1.44) m |
-| Circuit: altitude / tilt / heading error | 0.10 (0.38) m / 0.38 (1.25) deg / 0.19 (0.71) deg | 0.27 (0.65) m / 3.79 (6.89) deg / 1.45 (2.94) deg |
-| Circuit: tilt error in corners | 0.40 (1.25) deg | 4.30 (6.89) deg |
-| Circuit: true speed / altitude | 4.25-5.21 m/s / 4.57-5.27 m | 3.54-5.06 m/s / 4.28-5.23 m |
-| GPS glitch 3.5 m / 2.5 s: true heli moved | 0.65 (1.16) m, back to 0.50 m | 2.70 (3.04) m, back to 0.34 m |
-| ... EKF rejections | 109 of 125 glitched samples; the 2 s reset fires once into the glitch and once back out (8 resets in 5 runs), each shifting the hold target with the estimate | |
-| GPS glitch 6 m / 8 s (reset path) | moved 0.67 (1.20) m, back to 0.37 m; 2 resets per run, no crash | moved 6.13 (6.47) m, back to 0.37 m |
-| LAND x5: touchdown / from pad centre | 0.28-0.36 m/s / 0.23-0.64 m | 0.23-0.39 m/s / 0.04-0.70 m |
-| AUTOROTATE x5: touchdown / from pad | 0.57-0.63 m/s / 0.94-2.15 m, 0 rescues | 0.59-0.83 m/s / 1.37-3.24 m, 0 rescues |
-| Crash protection, full roll at 8 m x5 | trigger +0.28-0.30 s, min alt 7.99-8.24 m, hold after 1.20-1.36 s | trigger +0.30-0.31 s, min alt 7.80-8.07 m, hold after 1.16-1.26 s |
+| Hover 60 s: est pos error | 0.47 (0.97) m | 0.49 (1.17) m |
+| Hover: altitude / tilt / heading error | 0.009 (0.04) m / 0.34 (1.21) deg / 0.15 (0.65) deg | 0.015 (0.08) m / 0.58 (1.74) deg / 1.51 (2.24) deg |
+| Hover: true wander from anchor | 0.48 (1.02) m | 0.51 (1.15) m |
+| Circuit 3 laps: est pos error | 0.43 (0.78) m | 0.65 (1.54) m |
+| Circuit: altitude / tilt / heading error | 0.09 (0.38) m / 0.39 (1.39) deg / 0.19 (0.72) deg | 0.28 (0.68) m / 3.91 (7.54) deg / 1.46 (3.06) deg |
+| Circuit: tilt error in corners | 0.40 (1.39) deg | 4.43 (7.54) deg |
+| Circuit: true speed / altitude | 4.38-5.23 m/s / 4.57-5.29 m | 3.50-5.22 m/s / 4.30-5.08 m |
+| GPS glitch 3.5 m / 2.5 s: true heli moved | 0.48 (0.71) m, back to 0.29 m | 2.45 (2.78) m, back to 0.33 m |
+| ... EKF rejections | 109 of 125 glitched samples; the 2 s reset fires once into the glitch and once back out (10 resets in 5 runs), each shifting the hold target with the estimate | |
+| GPS glitch 6 m / 8 s (reset path) | moved 0.58 (0.81) m, back to 0.30 m; 2 resets per run, no crash | moved 6.07 (6.28) m, back to 0.47 m |
+| LAND x5: touchdown / from pad centre | 0.29-0.36 m/s / 0.22-0.64 m | 0.34-0.39 m/s / 0.05-0.68 m |
+| AUTOROTATE x5: touchdown / from pad | 0.59-0.65 m/s / 0.95-2.24 m, 0 rescues | 0.66-0.84 m/s / 1.48-2.38 m, 0 rescues |
+| Crash protection, full roll at 8 m x5 | trigger +0.29 s, min alt 7.70-8.11 m, hold after 1.46-1.62 s | trigger +0.30 s, min alt 7.42-7.83 m, hold after 1.41-1.57 s |
 
 10 minutes (60 s hover then circuit laps, 5 seeds, EKF): finite throughout, covariance diagonal
-positive, below 1e4 and symmetric to 1e-9 (checked every second). |error| < 3 sigma: x 99.4%,
-z 99.4%, height 100%, tilt 99.9%, heading 99.2%; horizontal NEES mean 1.84 (2 expected for 2 DOF).
+positive, below 1e4 and symmetric to 1e-9 (checked every second). |error| < 3 sigma: x 99.7%,
+z 99.6%, height 100%, tilt 99.9%, heading 99.0%; horizontal NEES mean 1.88 (2 expected for 2 DOF).
 1-sigma ranges: position 0.46-0.83 m, height 0.02-0.47 m (rangefinder near the ground, baro + GPS
-at 5 m), tilt 0.34-0.61 deg, heading 0.19-0.21 deg. The largest position error, 4.3 m, is a natural
+at 5 m), tilt 0.35-0.63 deg, heading 0.19-0.21 deg. The largest position error, 4.4 m, is a natural
 2..4 m GPS glitch (every 2..3 min) on its way through the reset.
 
 The 3 m glitch reset is a judgement call: a real EKF cannot tell a 2 s glitch from a true position
 jump, so after 2 s it believes GPS. The autopilot target moves with the reset, so the heli barely
 moves, but the estimate carries the glitch offset until the glitch ends and the second reset takes
 it back.
+
+### Dead reckoning without GPS: the inverted-hover drift (root cause and fix)
+
+The REAL inverted hover used to drift 1.3..4.6 m (mean 2.5 m over 20 seeds, score 58..94, mean 78;
+IDEAL 1.0 m / 94). GPS is gone for 6..9 s (antenna upside down). Diagnosed with
+`cargo run --release --example inv_diag -- <seed0> <n> 4 [trace]`, which logs per seed the true and
+estimated gyro bias, accel bias, the world-frame tilt error about x and z, velocity and position
+error, gravity-aiding and drag fusion counts, baro use and sigmas through the stunt. During the
+investigation the same tool fed the EKF and the controllers oracle (true) values one at a time.
+That code was removed afterwards.
+
+What it was **not**:
+
+- Gyro bias. The bias error stayed at 0.02..0.15 deg/s through the flips. With the estimated bias
+  forced to the true bias for the whole outage, the mean drift went from 2.46 to 2.38 m over 40 seeds,
+  no change. Freezing bias learning above 0.5 or 1 rad/s did nothing either (1.48 / 1.50 m against
+  1.50 m with the fix in place). Neither change was kept.
+- Gravity aiding. In the outage it passes only 5..21 of about 60 windows (the 0.35 rad/s rate gate
+  and the |f| = g gate). Turning it off while GPS is lost changed nothing (2.45 m).
+- Accel bias, baro, rangefinder (off above 25 deg), the GPS latency buffer and reacquire handling.
+  Re-convergence was already 0.0..0.5 s. Giving the controller true position and velocity only after
+  reacquire changed nothing (2.48 m). Giving them only during the outage brought it to IDEAL (1.20 m).
+  The error is made during the outage, and the extra metres after reacquire are just the heli
+  flying back.
+- The stunt controller's gains. Scaling the position or velocity gain down with EKF velocity sigma
+  made no difference (1.50..1.54 m).
+
+What it **was**: plain inertial dead reckoning with nothing to bound the velocity. Without GPS the
+filter has no horizontal velocity reference at all. The 40 / 20 Hz low-passed, vibrating IMU
+integrates a tilt error of 0.3..2 deg (random walk of the vibration-driven gyro noise plus the
+0.5 deg tilt the filter already carried into the flip). Times 1 g, that is 0.05..0.35 m/s2, which
+becomes 0.4..1.4 m/s of velocity error in 6..9 s. The hold controller then flies the heli there. A
+per-term velocity budget over the outage matched the logged error to within 0.1 m/s: tilt x g was
+the dominant term in most seeds, IMU noise integrated directly came second, and accel bias was
+small. A noise-free IMU with the true bias and the true entry tilt still left 1.7 m, so no
+bias-learning or noise-tuning change could reach IDEAL.
+
+The fix is the one real flight controllers use for this (ArduPilot EK3 `EK3_DRAG_*`, PX4 EKF2 drag
+fusion). On a helicopter the accelerometer across the shaft measures only airframe drag, because
+thrust and disc damping act along the shaft and gravity is not sensed. So
+`f_body,xz = R' (-k (v - wind))` is a velocity measurement relative to the air. The filter gains
+two wind states (x, z) and fuses the 0.1 s mean of that specific force at 10 Hz (table above). With
+GPS, drag fusion only updates velocity and wind. The drag model ignores disc tilt and flapback, and
+letting it tilt the attitude cost 1.5 points of the 10-minute 3-sigma tilt consistency. Once GPS is
+lost it also corrects tilt and gyro / accel bias, because then it is the only horizontal reference.
+The model k is calibrated 10% low, like a field-calibrated coefficient. The wind random walk
+(0.1 m/s/sqrt s) is the main tuning knob. At 0.25, the wind state soaks up the velocity drift it is
+meant to bound (mean 1.70 m against 1.50 m). No truth or position-hold pseudo-measurement is used.
+
+Inverted hover, REAL EKF, per seed (score / max deviation m / max est velocity error m/s / max est position error m):
+
+| seed | before | after |
+|---|---|---|
+| 800 | 68 / 3.34 / 0.91 / 2.58 | 84 / 1.98 / 0.46 / 1.19 |
+| 801 | 83 / 2.02 / 0.67 / 2.27 | 93 / 1.06 / 0.45 / 1.66 |
+| 802 | 78 / 2.64 / 0.79 / 2.60 | 89 / 1.54 / 0.66 / 1.92 |
+| 803 | 88 / 1.65 / 0.54 / 1.78 | 93 / 1.15 / 0.52 / 1.54 |
+| 804 | 66 / 3.36 / 1.35 / 3.66 | 91 / 1.16 / 0.29 / 1.15 |
+| 805 | 93 / 1.16 / 0.42 / 1.68 | 94 / 1.05 / 0.41 / 1.15 |
+| 806 | 62 / 3.94 / 1.18 / 2.49 | 86 / 1.79 / 0.65 / 0.78 |
+| 807 | 53 / 4.62 / 1.36 / 4.01 | 83 / 2.08 / 0.59 / 1.40 |
+| 810 | 63 / 3.69 / 1.04 / 3.48 | 86 / 1.71 / 0.57 / 1.55 |
+| 811 | 77 / 2.46 / 0.99 / 2.38 | 94 / 0.98 / 0.34 / 1.28 |
+| 812 | 91 / 1.28 / 0.50 / 1.41 | 93 / 1.03 / 0.46 / 0.83 |
+| 813 | 76 / 2.75 / 0.51 / 1.65 | 77 / 2.60 / 0.56 / 1.79 |
+| 814 | 85 / 1.66 / 0.41 / 1.43 | 80 / 2.19 / 0.45 / 1.61 |
+
+Over 120 seeds (800.., 900.., 1000.., 40 each): mean deviation 1.40..1.50 m, max 2.4..2.6 m, mean
+score 89..90, 31..35 of 40 at 85 or more (before: 2.5 m, score 78, 14 of 40). `t8_inverted_dead_reckoning`
+(seeds 820..839) measures 1.45 m mean, 2.30 m max, score 89 mean and 79 min, against 2.45 / 4.27 / 78 / 58
+before. The target of 1.5 m is met on average and in about 60% of seeds. The rest are the
+irreducible part. Even with a perfect IMU and the true entry state, the oracle runs left 1.5..1.7 m
+mean: six seconds of dead reckoning on a vibrating helicopter is not a hover with GPS. Nothing else
+regressed: every other table in this README was rerun with the new filter.
 
 ## Autopilot
 
@@ -302,25 +381,58 @@ and climbs as before.
 | Rangefinder | no reading above 25 deg of tilt or inverted (unchanged, verified in `t8_stunt_sensors`) |
 | GPS sky view | antenna on the canopy: one satellite lost per 15 deg of tilt beyond 30 deg, no fix beyond 110 deg ("GPS LOST (inverted)"); on reacquire 2..4 s with 5..8 satellites and 3x position / velocity noise ("GPS REACQUIRING n sats"), reported to the EKF as 3x measurement sigma |
 | Vibration | `rpm^2 (1 + 0.35 (|thrust_g| - 1)+) + 0.15 (disc tilt rate - 0.5)+ rpm`, max 2.5x; drives gyro / accel vibration and the EKF's IMU process noise; "VIB n.nx" in the panel above 1.25x |
-| EKF | gravity aiding already gated (`||f| - g| < 0.25` and rates < 0.35 rad/s): no fusion at > 1 rad/s in the stunt tests; coasts on the IMU while GPS is lost (status GPS LOST, sigma grows) and reconverges through the normal gates |
+| EKF | gravity aiding already gated (`||f| - g| < 0.25` and rates < 0.35 rad/s): no fusion at > 1 rad/s in the stunt tests; dead-reckons while GPS is lost (status GPS LOST, sigma grows), with drag fusion bounding the velocity (see "Dead reckoning without GPS"), and reconverges through the normal gates |
 
 The noise draw order of the GPS model is unchanged, so runs without stunts keep their exact random realisation.
 
 ### Stunt results
 
-`cargo test --release --test suites t8 -- --nocapture` (1 run per stunt and mode, breeze):
+`cargo test --release --test suites t8_stunt_matrix -- --nocapture` (5 seeds per stunt and mode,
+seeds 810..814, breeze; ranges over the 5 runs, mean in brackets). Every run completed with no crash
+and no rescue. Deviation is lateral from the line for loop and roll, horizontal for the others.
+Heading is the error at exit. The asserts in `matrix_bounds` are these ranges with margin.
 
-| Stunt | IDEAL: min alt / lost / score | REAL EKF: min alt / lost / score | REAL EKF max est error att / pos |
-|---|---|---|---|
-| Pirouette | 15.1 m / 0.0 m / 100 | 15.2 m / 0.0 m / 100 | 0.7 deg / 0.44 m |
-| Loop | 16.8 m / 1.2 m / 92 | 16.5 m / 1.2 m / 92 | 1.3 deg / 0.23 m |
-| Roll | 17.3 m / 0.7 m / 97 | 17.2 m / 0.7 m / 94 | 1.8 deg / 1.06 m |
-| Flip | 17.3 m / 0.8 m / 86 | 17.2 m / 0.8 m / 87 | 1.2 deg / 0.58 m |
-| Inverted hover | 19.6 m / 0.4 m / 94 | 19.7 m / 0.4 m / 66 | 1.4 deg / 3.66 m (6 s GPS outage; back under 1 m 0.4 s after reacquire) |
+IDEAL:
 
-None of these runs crashed or triggered a rescue. Broken stunts: a loop at 7 m with the collective cut over the top
-triggers "Too low" 2.6 s in and recovers (min 2.3..2.5 m), and a collective cut mid-roll triggers "Sinking" 2.3 s in and
-recovers (min 6.4..6.7 m), in both IDEAL and REAL. With PROTECT off, both crash. Shortest-way rescue: rolled 150 deg ->
+| Stunt | done / crash / rescue | min alt m | height lost m | max dev m | heading deg | recovery s | score |
+|---|---|---|---|---|---|---|---|
+| Pirouette | 5 / 0 / 0 | 15.1 | 0.0 | 0.2 (0.22) | 2.3-2.4 | 0.5 | 100 |
+| Loop | 5 / 0 / 0 | 16.7 | 1.3 | 0.0-0.2 (0.12) | 0.5-0.6 | 1.5-1.6 | 92 |
+| Roll | 5 / 0 / 0 | 17.3 | 0.7 | 0.9-1.0 (1.00) | 0.0-0.3 | 1.2 | 96-97 (96) |
+| Flip | 5 / 0 / 0 | 17.3 | 0.8 | 1.4-1.5 (1.47) | 0.2-0.4 | 0.9-1.5 | 86-87 (86) |
+| Inverted hover | 5 / 0 / 0 | 19.6 | 0.4-0.5 | 1.0 (1.03) | 0.2-0.3 | 0.6-0.8 | 93-94 (94) |
+
+REAL, EKF (default). The last two columns are the largest estimate-vs-truth tilt and horizontal position error
+during the manoeuvre, and how long after the GPS fix returned the estimate was back under 1 m:
+
+| Stunt | done / crash / rescue | min alt m | height lost m | max dev m | heading deg | recovery s | score | max est err att deg / pos m | re-converged after s |
+|---|---|---|---|---|---|---|---|---|---|
+| Pirouette | 5 / 0 / 0 | 15.0-15.2 | 0.0-0.1 | 0.2-0.5 (0.32) | 1.2-1.6 | 0.5 | 100 | 0.4-0.9 / 0.34-0.61 | no GPS loss |
+| Loop | 5 / 0 / 0 | 16.5-16.8 | 1.0-1.3 | 0.2-1.2 (0.49) | 0.4-0.8 | 1.7-2.0 | 92-94 (93) | 0.9-1.7 / 0.37-1.02 | 0.0 |
+| Roll | 5 / 0 / 0 | 17.0-17.2 | 0.7-0.8 | 1.1-1.3 (1.15) | 0.0-0.2 | 1.1-1.3 | 93-96 (95) | 0.9-2.0 / 0.24-0.67 | 0.0 |
+| Flip | 5 / 0 / 0 | 17.3-17.4 | 0.6-0.8 | 1.3-1.6 (1.39) | 0.3-0.9 | 0.9-1.7 | 86-88 (88) | 0.6-1.8 / 0.38-0.75 | 0.0 |
+| Inverted hover | 5 / 0 / 0 | 19.6-19.7 | 0.4-0.5 | 1.0-2.6 (1.70) | 0.2-0.7 | 0.5-2.4 | 77-94 (86) | 1.0-1.9 / 0.83-1.79 | 0.0-0.3 |
+
+Before the drag-fusion fix, on the same seeds, the inverted hover was dev 1.3-3.7 m (2.37), score 63-91 (78),
+max est pos error 1.41-3.48 m, re-converged after 0.2-0.5 s. The loop, roll and flip lose GPS only for a moment
+and are unchanged within noise (loop 91-94, roll 93-97, flip 86-88). `t8_inverted_dead_reckoning` adds 20 more
+inverted-hover seeds (above).
+
+REAL, BASIC (the complementary filter), `t8_stunt_matrix_basic`:
+
+| Stunt | done / crash / rescue | min alt m | height lost m | max dev m | heading deg | recovery s | score | max est err att deg / pos m | re-converged after s |
+|---|---|---|---|---|---|---|---|---|---|
+| Loop | 5 / 0 / 0 | 16.7-17.3 | 0.7-1.2 | 0.6-2.0 (1.25) | 0.6-5.3 | 1.7-5.7 | 81-97 (89) | 8.2-15.4 / 0.83-1.38 | 0.0-0.3 |
+| Roll | 5 / 0 / 0 | 17.0-17.6 | 0.6-0.9 | 2.2-4.3 (3.03) | 0.0-0.6 | 1.1-3.2 | 62-85 (76) | 5.9-8.2 / 0.52-1.08 | 0.0 |
+| Flip | 5 / 0 / 0 | 17.2-17.6 | 0.5-0.8 | 2.1-2.7 (2.30) | 0.0-0.5 | 0.9-2.0 | 75-82 (79) | 6.2-7.4 / 0.40-0.88 | 0.0 |
+
+BASIC levels on the accelerometer minus the GPS-derived manoeuvre acceleration, so the flips and rolls pull its
+attitude 6..15 deg off. The attitude loop still holds the manoeuvre, but the exit drifts 2..4 m. The EKF holds
+attitude within 2 deg.
+
+Broken stunts (`t8_stunt_protect`): a loop at 7 m with the collective cut over the top triggers "Too low" 2.6 s in
+and recovers (min 2.5 m IDEAL, 2.3 m REAL). A collective cut mid-roll triggers 1.8 s in IDEAL ("Too low and fast",
+min 10.2 m) and 2.3 s in REAL ("Sinking", min 6.2 m), and recovers. With PROTECT off, both crash. Shortest-way rescue: rolled 150 deg ->
 recovers about roll (-155 deg), pitched 150 / -160 deg -> about pitch.
 
 ## Flying assists (`assist`)
@@ -348,7 +460,7 @@ Key T stays takeoff, so the tail gyro is on V. `cargo test --release --test suit
 | Same, PROTECT off | IDEAL and REAL: crash, "Dynamic rollover: the skids caught while sliding sideways" |
 | Gentle sink: 5 m/s forward, -0.8 m/s from 4 m, PROTECT on (2 seeds) | IDEAL trigger at 1.37 m (v/s -0.58), min 1.35 m; REAL trigger at 1.57-1.58 m, min 1.55 m; no crash |
 | Gentle sink, PROTECT off | IDEAL and REAL: crash, dynamic rollover |
-| No false triggers (IDEAL and REAL each) | autopilot LAND x3 (0.35 / 0.35 / 0.35, REAL 0.40 / 0.38 / 0.36 m/s), manual gentle landing x3 with 0 / 0.4 / 0.8 m/s drift, AUTOROTATE x2 (0.42 / 0.41, REAL 0.64 / 0.59 m/s), stunts x1 each (IDEAL: 100 / 92 / 96 / 87 / 94): 0 rescues |
+| No false triggers (IDEAL and REAL each) | autopilot LAND x3 (0.35 / 0.35 / 0.35, REAL 0.40 / 0.38 / 0.36 m/s), manual gentle landing x3 with 0 / 0.4 / 0.8 m/s drift, AUTOROTATE x2 (0.42 / 0.41, REAL 0.63 / 0.59 m/s), stunts x1 each (IDEAL: 100 / 92 / 96 / 87 / 94): 0 rescues |
 | ALT HOLD handover: lift off on the stick, climb, hold 20 s, full up / down 2 s, descend to touchdown | engages at 0.52 m; hold at 3.01 m: band -0.00/+0.01 m (REAL 3.03 m: -0.05/+0.10, 3D 3.04 m: -0.00/+0.02); full up +2.94 m/s, full down -1.77 m/s (slewed); touchdown 0.58-0.62 m/s, back to direct; largest collective step at either handover 0.004 |
 | AUTO-YAW, straight 5 m/s across a 4.5 m/s crosswind | heading vs air-relative velocity mean 2.1 deg, max 5.7 deg (off: 44 deg) |
 | AUTO-YAW, coordinated turn on roll stick only | sideslip mean 0.3 deg, max 0.4 deg (off: 41 deg) |
@@ -358,7 +470,7 @@ Key T stays takeoff, so the tail gyro is on V. `cargo test --release --test suit
 
 ## Tests: Rust vs JS
 
-`cargo test --release -- --nocapture --test-threads=1` in `rust/` (37 suites: the 26 below plus 4 `t8_stunt*` and 7 `t9_*` assist suites; plus `tests/step.rs`, about 3.5 s; the 7 `t7_ekf_*`
+`cargo test --release -- --nocapture --test-threads=1` in `rust/` (40 suites: the 26 below plus 7 `t8_*` stunt suites (including the full matrices) and 7 `t9_*` assist suites; plus `tests/step.rs`, about 10 s; the 7 `t7_ekf_*`
 suites are the EKF vs BASIC table above) against the JS harnesses `node test*.js rc-heli-field.html` on the original page. The JS uses Math.random, the Rust
 a seeded RNG, so noisy numbers agree within noise rather than to the digit. The REAL rows now run on
 the EKF (the default); the BASIC column of the table above is the original estimator.
@@ -438,8 +550,9 @@ wasm frame JSON (mode code, toasts drained after each frame).
   and checks the climb bar beside the left stick (filled above zero, target mark), and checks a 390 px phone viewport with the picker open: no horizontal scroll,
   sticks, climb bar (clear of the stick labels) and all buttons in view, 3-column readouts. The smoke test also toggles Q / Y / V and the three buttons. There are no page errors.
 
-The sim costs about 6.0 microseconds per 240 Hz step in wasm (Node) in REAL mode with both estimators
-running (3.4 before the EKF), and building a frame with the sensor panel takes about 30 microseconds.
+The sim costs about 6..10 microseconds per 240 Hz step in wasm (Node) in REAL mode with both estimators
+running (3.4 before the EKF; the 18-state filter with drag fusion is about 1 microsecond more than the 16-state one,
+within the run-to-run spread on the build machine), and building a frame with the sensor panel takes about 30 microseconds.
 
 ## Build and run
 
@@ -461,4 +574,4 @@ submodule (rust-lang/backtrace-rs at 28ec93b5), and copied to
 missing. The `wasm` profile is opt-level z, LTO, one codegen unit, panic abort, stripped. The crate
 has no dependencies.
 
-Sizes: wasm 134 KB raw, 83 KB gzip+base64 embedded; bundle 17 KB; page 119 KB (116 KiB).
+Sizes: wasm 136 KB raw, 85 KB gzip+base64 embedded; bundle 17 KB; page 120,394 bytes (118 KiB).

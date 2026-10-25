@@ -1618,7 +1618,7 @@ fn stunt_batch(m: SMode, k: Kind, seeds: std::ops::Range<u64>) -> SAgg {
     }
     let real = m != SMode::Ideal;
     println!(
-        "RUST STUNT {} {:<14} | done {}/{} crashes {} rescues {} | min alt {} m | lost {} m | dev {} m | hdg {} deg | rec {} s | score {} (mean {:.0}){}",
+        "RUST STUNT {} {:<14} | done {}/{} crashes {} rescues {} | min alt {} m | lost {} m | dev {} m (mean {:.2}) | hdg {} deg | rec {} s | score {} (mean {:.0}){}",
         m.name(),
         k.name(),
         a.done,
@@ -1628,6 +1628,7 @@ fn stunt_batch(m: SMode, k: Kind, seeds: std::ops::Range<u64>) -> SAgg {
         rng_s(&a.min_alt, 1),
         rng_s(&a.lost, 1),
         rng_s(&a.dev, 1),
+        a.dev.as_ref().map_or(0.0, |s| s.mean()),
         rng_s(&a.hdg, 1),
         rng_s(&a.rec, 1),
         rng_s(&a.score, 0),
@@ -1646,6 +1647,83 @@ fn stunt_batch(m: SMode, k: Kind, seeds: std::ops::Range<u64>) -> SAgg {
         }
     );
     a
+}
+
+/// Seeds of the full stunt matrices (5 per stunt and mode).
+const MATRIX_SEEDS: std::ops::Range<u64> = 810..815;
+
+/// Per-stunt bounds for the full matrices: (min score, max position deviation m, max height lost m).
+/// Observed values with margin; see README "Stunt results".
+fn matrix_bounds(m: SMode, k: Kind) -> (f64, f64, f64) {
+    match (m, k) {
+        (_, Kind::Pirouette) => (95.0, 0.8, 0.5),
+        (SMode::Ideal, Kind::Loop) => (88.0, 0.6, 1.8),
+        (SMode::Ideal, Kind::Roll) => (90.0, 1.4, 1.2),
+        (SMode::Ideal, Kind::Flip) => (80.0, 1.9, 1.3),
+        (SMode::Ideal, Kind::Inverted) => (88.0, 1.4, 1.0),
+        (SMode::Ekf, Kind::Loop) => (85.0, 1.7, 1.8),
+        (SMode::Ekf, Kind::Roll) => (87.0, 1.8, 1.3),
+        (SMode::Ekf, Kind::Flip) => (80.0, 2.1, 1.3),
+        (SMode::Ekf, Kind::Inverted) => (70.0, 3.0, 1.0),
+        (SMode::Basic, Kind::Loop) => (72.0, 2.6, 2.0),
+        (SMode::Basic, Kind::Roll) => (55.0, 5.0, 1.5),
+        (SMode::Basic, Kind::Flip) => (68.0, 3.3, 1.3),
+        (SMode::Basic, Kind::Inverted) => (0.0, 99.0, 99.0),
+    }
+}
+
+fn check_matrix(m: SMode, k: Kind, a: &SAgg) {
+    let (smin, dmax, lmax) = matrix_bounds(m, k);
+    let n = MATRIX_SEEDS.end - MATRIX_SEEDS.start;
+    assert_eq!((a.done as u64, a.crashes, a.rescues), (n, 0, 0), "{} {}: completes, no crash, no false rescue", m.name(), k.name());
+    let (sc, dev, lost) = (a.score.as_ref().unwrap(), a.dev.as_ref().unwrap(), a.lost.as_ref().unwrap());
+    assert!(sc.mn >= smin, "{} {}: score {} < {smin}", m.name(), k.name(), sc.mn);
+    assert!(dev.mx <= dmax, "{} {}: deviation {} > {dmax}", m.name(), k.name(), dev.mx);
+    assert!(lost.mx <= lmax, "{} {}: height lost {} > {lmax}", m.name(), k.name(), lost.mx);
+    // BASIC exits a loop up to 5.3 deg off heading (its compass fusion is slow)
+    assert!(a.hdg.as_ref().unwrap().mx < if m == SMode::Basic { 8.0 } else { 4.0 }, "{} {}: heading error at exit", m.name(), k.name());
+    if m != SMode::Ideal {
+        // BASIC's accelerometer leveling is pulled off by the manoeuvre (8..15 deg in a loop)
+        assert!(a.att.as_ref().unwrap().mx < if m == SMode::Ekf { 3.0 } else { 20.0 }, "{} {}: attitude estimate", m.name(), k.name());
+        assert!(a.pos.as_ref().unwrap().mx < if m == SMode::Ekf { 2.5 } else { 2.0 }, "{} {}: position estimate", m.name(), k.name());
+        if a.gps_lost > 0 {
+            // estimate back under 1 m within 1 s of the fix returning, every run
+            let r = a.reconv.as_ref().expect("re-converged");
+            assert!(r.n as u32 == a.gps_lost && r.mx < 1.0, "{} {}: re-convergence {:?}", m.name(), k.name(), r.mx);
+        }
+    }
+}
+
+/// Full matrix: every stunt, 5 seeds IDEAL and 5 seeds REAL (EKF).
+#[test]
+fn t8_stunt_matrix() {
+    for m in [SMode::Ideal, SMode::Ekf] {
+        for k in KINDS {
+            let a = stunt_batch(m, k, MATRIX_SEEDS);
+            check_matrix(m, k, &a);
+        }
+    }
+}
+
+/// Full matrix, REAL BASIC estimator: loop, roll, flip, 5 seeds each.
+#[test]
+fn t8_stunt_matrix_basic() {
+    for k in [Kind::Loop, Kind::Roll, Kind::Flip] {
+        let a = stunt_batch(SMode::Basic, k, MATRIX_SEEDS);
+        check_matrix(SMode::Basic, k, &a);
+    }
+}
+
+/// REAL (EKF) inverted hover over 20 seeds: the dead-reckoning case (6 s without GPS).
+/// Before drag fusion: mean deviation 2.5 m, mean score 78; now about 1.4 m / 89.
+#[test]
+fn t8_inverted_dead_reckoning() {
+    let a = stunt_batch(SMode::Ekf, Kind::Inverted, 820..840);
+    assert_eq!((a.done, a.crashes, a.rescues), (20, 0, 0));
+    let (sc, dev) = (a.score.as_ref().unwrap(), a.dev.as_ref().unwrap());
+    println!("RUST STUNT REAL EKF Inverted hover x20: dev mean {:.2} max {:.2} m | score mean {:.1} min {:.0}", dev.mean(), dev.mx, sc.mean(), sc.mn);
+    assert!(dev.mean() < 1.8 && dev.mx < 3.0, "dead-reckoning drift: mean {} max {}", dev.mean(), dev.mx);
+    assert!(sc.mean() >= 85.0 && sc.mn >= 70.0, "score: mean {} min {}", sc.mean(), sc.mn);
 }
 
 /// One IDEAL and one REAL (EKF) run per stunt: completes, no crash, no false rescue.
