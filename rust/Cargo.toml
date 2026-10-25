@@ -2,6 +2,8 @@
 name = "helisim"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/conradmicallef/helisim"
 description = "RC helicopter flight model, flybarless gyro, sensors, estimator and autopilot. Native for tests, wasm32 for the page."
 
 [lib]

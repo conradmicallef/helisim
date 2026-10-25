@@ -2,6 +2,7 @@
   "name": "helisim-web",
   "version": "0.1.0",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "description": "RC Heli Field page: three.js view and HUD over the helisim wasm core",
   "scripts": {
     "build": "./build.sh",

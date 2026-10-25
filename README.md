@@ -577,3 +577,16 @@ missing. The `wasm` profile is opt-level z, LTO, one codegen unit, panic abort, 
 has no dependencies.
 
 Sizes: wasm 136 KB raw, 85 KB gzip+base64 embedded; bundle 17 KB; page 120,394 bytes (118 KiB).
+
+## Licence
+
+Copyright (C) 2026 Conrad Micallef
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General
+Public License as published by the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE)
+for the full text.
+
+The page loads [three.js](https://threejs.org/) (MIT licence) from cdnjs at run time; it is not part of this
+repository.
