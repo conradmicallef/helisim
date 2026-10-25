@@ -11,6 +11,7 @@
 //! | GPS | 10 Hz, 150 ms latency | 0.4 m / 0.8 m noise, wandering bias, rare glitches |
 //! | ESC rpm | 10 Hz, 100 ms latency | 10 rpm steps, 0.6% noise, 2% dropped frames |
 //! | battery | 10 Hz | 12S pack, OCV curve, sag through pack resistance, 0.6 s low-pass |
+//! | downward camera | 20 Hz, 80 ms latency | pad tag detection, 0.7 px noise, see `precland` |
 
 pub use crate::estimator::Est;
 use crate::ekf::Ekf;
@@ -155,6 +156,9 @@ pub struct Sensors {
     /// number of GPS losses and the time of the last reacquire (tests)
     pub gps_losses: u32,
     pub gps_back_t: Option<f64>,
+    /// downward camera and the precision-landing target estimator
+    pub cam: crate::precland::Camera,
+    pub pl: crate::precland::PrecLand,
 }
 
 impl Sensors {
@@ -184,6 +188,8 @@ impl Sensors {
             gps_reacq_t0: 0.0,
             gps_losses: 0,
             gps_back_t: None,
+            cam: crate::precland::Camera::new(0x7a6),
+            pl: crate::precland::PrecLand::new(),
         }
     }
     pub fn glitching(&self) -> bool {
@@ -236,6 +242,8 @@ impl Sim {
         s.gps_back_t = None;
         s.st.gps_lost = false;
         s.st.gps_reacq = false;
+        s.cam.reset(t);
+        s.pl = crate::precland::PrecLand::new();
         mirror(&mut self.est, &self.h);
     }
 
@@ -462,6 +470,23 @@ impl Sim {
             if let Some(a) = self.auto.as_mut() {
                 a.anchor += dp;
                 a.entry += dp;
+                a.pad_ref += v3(dp.x, 0.0, dp.z);
+                a.tgt += v3(dp.x, 0.0, dp.z);
+            }
+            self.sens.pl.shift(dp);
+            self.toast("GPS reset", format!("The estimate jumped {} m to the GPS fix", crate::jsonw::to_fixed(dp.x.hypot(dp.z), 1)), "bad");
+        }
+        // downward camera and the pad target estimator (REAL only; IDEAL flies the surveyed pad)
+        if real {
+            let s = &mut self.sens;
+            let dets = s.cam.step(t, &self.h);
+            let ekf_on = use_ekf && s.ekf.init;
+            let var0 = if ekf_on { s.ekf.sig_pos().powi(2) } else { 1.0 };
+            let (sig_tilt, sig_hgt) = if ekf_on { (s.ekf.sig_tilt(), s.ekf.sig_hgt()) } else { (1.0 * DEG, 0.15) };
+            s.pl.tick(t, dt, var0);
+            s.pl.push(t, self.est.p, self.est.q);
+            for d in dets {
+                s.pl.update(d, t, sig_tilt, sig_hgt, self.est.w);
             }
         }
     }

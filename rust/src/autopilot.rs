@@ -3,6 +3,7 @@
 //! state and returns commands in self-level stick units plus a raw collective.
 
 use crate::heli::*;
+use crate::heli::PAD;
 use crate::jsonw::{round_str, to_fixed};
 use crate::math::*;
 use crate::sim::{AutoResult, Cmd, FsAt, Sim};
@@ -22,6 +23,78 @@ pub mod ar {
     pub const FLARE_ALT: f64 = 6.0;
     pub const FLARE_D: f64 = 5.0;
     pub const CUSH_A: f64 = 5.5;
+}
+
+/// LAND transit: speed and height by distance to the pad (see README "LAND transit").
+pub mod land {
+    /// cruise speed cap, m/s, and the braking deceleration the speed profile is built on, m/s^2
+    pub const V_MAX: f64 = 8.0;
+    pub const A_BRAKE: f64 = 1.5;
+    /// gentle approach inside this radius: 0.9 m/s per m of distance, at most V_APP
+    pub const R_APP: f64 = 5.0;
+    pub const V_APP: f64 = 2.5;
+    /// airspeed cap: ground speed into a headwind is at most AIR_MAX - headwind
+    pub const AIR_MAX: f64 = 9.0;
+    /// braking starts earlier with a tailwind: deceleration x (1 - TAIL_K x tailwind), at least TAIL_MIN
+    pub const TAIL_K: f64 = 0.08;
+    pub const TAIL_MIN: f64 = 0.6;
+    /// cruise height: H_NEAR beyond D_NEAR, rising to H_FAR at D_FAR; approach height from D_APP
+    pub const H_NEAR: f64 = 8.0;
+    pub const H_FAR: f64 = 12.0;
+    pub const D_NEAR: f64 = 15.0;
+    pub const D_FAR: f64 = 30.0;
+    pub const D_APP: f64 = 10.0;
+    /// approach height range (the height LAND was started at, clamped)
+    pub const H_APP_MIN: f64 = 3.0;
+    pub const H_APP_MAX: f64 = 5.0;
+    /// climb first: horizontal speed limit while more than CLIMB_DEF below the cruise height
+    pub const CLIMB_DEF: f64 = 1.5;
+    pub const CLIMB_V: f64 = 2.0;
+    pub const CLIMB_VZ: f64 = 2.5;
+    /// nose along the track above this speed (with 0.5 m/s hysteresis)
+    pub const YAW_V: f64 = 3.0;
+    /// tilt limit in transit
+    pub const LIM: f64 = 30.0;
+    /// the flown target follows a switch between camera and GPS targets at this speed, m/s
+    pub const TGT_SLEW: f64 = 0.8;
+    /// descend when within E_DESC of the target, slower than HS_DESC and within HDG_DESC of the
+    /// landing heading (tighter with the camera)
+    pub const E_DESC: f64 = 0.3;
+    pub const E_DESC_CAM: f64 = 0.12;
+    pub const HS_DESC: f64 = 0.35;
+    pub const HDG_DESC: f64 = 10.0;
+    /// a descent pauses (holding height) when the target moves more than this away, above 1 m
+    pub const E_PAUSE: f64 = 0.6;
+    /// position / velocity gains over the pad in the descent (the normal hold is 0.9 / 1.6)
+    pub const KP_DESC: f64 = 1.5;
+    pub const KV_DESC: f64 = 2.2;
+}
+
+/// Cruise height for a distance to the pad (before the approach-height floor and caps).
+pub fn cruise_height(d: f64, h_app: f64) -> f64 {
+    use land::*;
+    if d >= D_FAR {
+        H_FAR
+    } else if d >= D_NEAR {
+        H_NEAR + (H_FAR - H_NEAR) * (d - D_NEAR) / (D_FAR - D_NEAR)
+    } else if d >= D_APP {
+        H_NEAR
+    } else if d >= R_APP {
+        h_app + (H_NEAR - h_app).max(0.0) * (d - R_APP) / (D_APP - R_APP)
+    } else {
+        h_app
+    }
+}
+
+/// Transit speed for a distance to the stopping point: braking curve `sqrt(2 a (d - R) + V_APP^2)`
+/// outside the approach radius, the gentle `0.9 d` law inside. `a` is the braking deceleration.
+pub fn transit_speed(d: f64, a: f64, cap: f64) -> f64 {
+    use land::*;
+    if d > R_APP {
+        (2.0 * a * (d - R_APP) + V_APP * V_APP).sqrt().min(cap.max(V_APP))
+    } else {
+        (0.9 * d).min(V_APP)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,7 +132,17 @@ pub struct Auto {
     pub t: f64,
     pub forced: bool,
     pub fs: bool,
-    pub pad: Option<usize>,
+    /// surveyed pad position in the estimate's frame (moves with EKF position resets)
+    pub pad_ref: V3,
+    // LAND transit: start distance, approach height, height cap, flown target, nose-along-track latch
+    pub land_d0: f64,
+    pub land_h: f64,
+    pub land_cap: f64,
+    pub tgt: V3,
+    pub tgt_init: bool,
+    pub track_yaw: bool,
+    /// flying the camera target (else GPS)
+    pub cam_tgt: bool,
     // autorotation
     pub phase: Phase,
     pub min_rpm: f64,
@@ -97,7 +180,14 @@ impl Auto {
             t: 0.0,
             forced: false,
             fs: false,
-            pad: None,
+            pad_ref: v3(PAD.x, 0.0, PAD.z),
+            land_d0: 0.0,
+            land_h: 3.0,
+            land_cap: 1e9,
+            tgt: anchor,
+            tgt_init: false,
+            track_yaw: false,
+            cam_tgt: false,
             phase: Phase::Climb,
             min_rpm: 9.0,
             max_rpm: 0.0,
@@ -202,7 +292,79 @@ struct Follow {
     heading: f64,
 }
 
+/// Transit guidance: desired velocity, feed-forward acceleration, target height, heading.
+pub(crate) struct Transit {
+    pub vd: (f64, f64),
+    pub ff: (f64, f64),
+    pub alt_t: f64,
+    pub climbing: bool,
+}
+
 impl Sim {
+    /// Fly toward (tx, tz) and stop there: speed by distance with wind-aware braking, a height
+    /// profile `alt_t` (with climb first if more than `CLIMB_DEF` below it), nose along the track.
+    pub(crate) fn transit(&self, a: &mut Auto, tx: f64, tz: f64, alt_t: f64) -> Transit {
+        use land::*;
+        let est = &self.est;
+        let (dx, dz) = (tx - est.p.x, tz - est.p.z);
+        let d = dx.hypot(dz);
+        let (ux, uz) = if d > 1e-6 { (dx / d, dz / d) } else { (0.0, 0.0) };
+        let w_along = est.wind.x * ux + est.wind.z * uz; // > 0: tailwind
+        let a_eff = A_BRAKE * (1.0 - TAIL_K * w_along.max(0.0)).max(TAIL_MIN);
+        let cap = V_MAX.min(AIR_MAX + w_along.min(0.0));
+        let mut v = transit_speed(d, a_eff, cap);
+        let climbing = d > R_APP && self.est.alt < alt_t - CLIMB_DEF;
+        if climbing {
+            v = v.min(CLIMB_V);
+        }
+        // braking along the profile: feed the deceleration forward
+        let braking = d > R_APP && v < cap - 0.05 && !climbing && est.v.hyp_xz() > v - 0.5;
+        let ff = if braking { (-a_eff * ux, -a_eff * uz) } else { (0.0, 0.0) };
+        if v > YAW_V + 0.5 {
+            a.track_yaw = true;
+        } else if v < YAW_V - 0.5 {
+            a.track_yaw = false;
+        }
+        if a.track_yaw && d > 1.0 {
+            a.heading = (-ux).atan2(-uz);
+        }
+        Transit { vd: (ux * v, uz * v), ff, alt_t, climbing }
+    }
+
+    /// Pad position the autopilot flies to: the camera target while it is usable (REAL), else the
+    /// surveyed position in the estimate's frame.
+    pub(crate) fn pad_target(&self, a: &Auto) -> (V3, bool) {
+        let pl = &self.sens.pl;
+        if self.set.real && self.sens.cam.enabled && pl.usable(self.est.alt) {
+            (pl.pad, true)
+        } else {
+            (a.pad_ref, false)
+        }
+    }
+
+    /// Landing heading: the tag heading from the camera when known, else the surveyed pad heading.
+    fn land_heading(&self) -> f64 {
+        match (self.set.real, self.sens.pl.hdg) {
+            (true, Some(h)) if self.sens.pl.locked => h,
+            _ => PAD.hdg,
+        }
+    }
+
+    /// Cue text for LAND.
+    pub(crate) fn land_cue(&self, a: &Auto) -> String {
+        let cam = if a.cam_tgt { " (camera lock)" } else { "" };
+        let d = (a.tgt.x - self.est.p.x).hypot(a.tgt.z - self.est.p.z);
+        if a.descending {
+            format!("Autopilot: <em>descending</em> onto the pad{cam}.")
+        } else if d > land::R_APP && self.est.alt < cruise_height(d, a.land_h).min(a.land_cap).max(a.land_h) - land::CLIMB_DEF {
+            format!("Autopilot: <em>climbing</em> to {} m, then to the pad.", to_fixed(cruise_height(d, a.land_h).min(a.land_cap).max(a.land_h), 0))
+        } else if d > land::R_APP {
+            format!("Autopilot: flying to the pad, <em>{} m</em> at {} m/s.", to_fixed(d, 0), to_fixed(self.est.v.hyp_xz(), 1))
+        } else {
+            format!("Autopilot: <em>lining up</em> over the pad{cam}.")
+        }
+    }
+
     fn loop_follow(&mut self, a: &mut Auto) -> Follow {
         let l = loop_path();
         let n = l.n;
@@ -299,15 +461,20 @@ impl Sim {
         if mode == Mode::Circuit {
             a.alt = CIRC_ALT;
         }
+        a.pad_ref = self.sens.pl.nom;
         if mode == Mode::Land {
-            let p = nearest_pad(self.est.p.x, self.est.p.z);
-            a.pad = Some(p);
-            a.anchor = v3(PADS[p].x, 0.0, PADS[p].z);
-            a.alt = alt.min(5.0).max(2.0);
+            a.anchor = a.pad_ref;
+            let d0 = (a.anchor.x - self.est.p.x).hypot(a.anchor.z - self.est.p.z);
+            a.land_d0 = d0;
+            a.land_h = clamp(alt, if d0 < land::R_APP { 2.0 } else { land::H_APP_MIN }, land::H_APP_MAX);
+            a.alt = a.land_h;
+            // short hops don't climb above where they started; nor does a forced landing
+            a.land_cap = if d0 > land::D_NEAR && !forced { 1e9 } else { alt.max(a.land_h) };
+            a.tgt = a.anchor;
+            a.tgt_init = false;
+            a.track_yaw = false;
         }
         if mode == Mode::Autorot {
-            let p = nearest_pad(self.est.p.x, self.est.p.z);
-            a.pad = Some(p);
             a.phase = Phase::Climb;
             a.min_rpm = 9.0;
             a.max_rpm = 0.0;
@@ -316,12 +483,11 @@ impl Sim {
                 a.entry_alt = alt;
             } else {
                 // run in and glide toward the pad, into the wind
-                a.entry = v3(PADS[p].x + ar::ENTRY_D + ar::RUN_D, 0.0, PADS[p].z);
+                a.entry = v3(a.pad_ref.x + ar::ENTRY_D + ar::RUN_D, 0.0, a.pad_ref.z);
                 a.entry_alt = ar::ENTRY_ALT;
             }
             a.alt = a.entry_alt;
         }
-        let pad_name = a.pad.map(|p| PADS[p].name).unwrap_or("A");
         let entry_alt = a.entry_alt;
         self.auto = Some(a);
         if !self.h.armed {
@@ -333,10 +499,10 @@ impl Sim {
             return;
         }
         let (title, sub) = match mode {
-            Mode::Land => ("Autopilot: landing", format!("Setting down on Pad {pad_name}")),
+            Mode::Land => ("Autopilot: landing", "Setting down on the pad".into()),
             Mode::Autorot => (
                 "Autopilot: practice autorotation",
-                format!("Climbing to {} m, then motor cut and glide to Pad {pad_name}", to_fixed(entry_alt, 0)),
+                format!("Climbing to {} m, then motor cut and glide to the pad", to_fixed(entry_alt, 0)),
             ),
             Mode::Circuit => ("Autopilot: circuit", "Touch any stick to take control".into()),
             _ => ("Autopilot: takeoff", "Touch any stick to take control".into()),
@@ -500,15 +666,15 @@ impl Sim {
             } else {
                 self.start_auto(Mode::Land, true, true, true, true);
             }
-            if let Some(p) = self.auto.as_ref().and_then(|a| a.pad) {
-                self.toast("Battery critical (8%)", format!("Forced landing on Pad {}", PADS[p].name), "bad");
+            if self.auto.is_some() {
+                self.toast("Battery critical (8%)", "Forced landing on the pad", "bad");
                 self.h.fs_at = Some(FsAt { t: self.sim_t, bat: self.h.bat, est: self.est.bat, stage: 8 });
             }
         } else if !h.fs15 && h.fs_t15 >= 2.0 && m != Some(Mode::Land) {
             h.fs15 = true;
             self.start_auto(Mode::Land, true, false, true, true);
-            if let Some(p) = self.auto.as_ref().and_then(|a| a.pad) {
-                self.toast("Battery low (15%)", format!("Landing on Pad {}", PADS[p].name), "bad");
+            if self.auto.is_some() {
+                self.toast("Battery low (15%)", "Landing on the pad", "bad");
                 self.h.fs_at = Some(FsAt { t: self.sim_t, bat: self.h.bat, est: self.est.bat, stage: 15 });
             }
         }
@@ -537,8 +703,7 @@ impl Sim {
 
     fn finish_autorot(&mut self, a: Auto) -> Cmd {
         let vs = self.h.last_impact;
-        let p = &PADS[a.pad.unwrap_or(0)];
-        let d_pad = (self.h.p.x - p.x).hypot(self.h.p.z - p.z);
+        let d_pad = pad_dist(self.h.p.x, self.h.p.z);
         self.h.auto_result = Some(AutoResult {
             vs,
             d_pad,
@@ -557,10 +722,9 @@ impl Sim {
         self.toast(
             format!("{g} autorotation landing"),
             format!(
-                "Touchdown {} m/s · {} m from Pad {} centre · min headspeed {}%",
+                "Touchdown {} m/s · {} m from the pad centre · min headspeed {}%",
                 to_fixed(vs, 2),
                 to_fixed(d_pad, 1),
-                p.name,
                 round_str(a.min_rpm * 100.0)
             ),
             if vs < 1.5 { "good" } else { "" },
@@ -589,6 +753,7 @@ impl Sim {
         let (mut ffx, mut ffz, mut ff_yaw, mut kv) = (0.0, 0.0, 0.0, 1.6);
         let mut coll_ov: Option<f64> = None;
         let mut lim = 24.0 * DEG;
+        let mut kp = 0.9;
         if a.mode == Mode::Takeoff && alt > a.alt - 0.3 {
             a.mode = Mode::Hold;
             self.toast(
@@ -607,13 +772,61 @@ impl Sim {
             lim = 30.0 * DEG;
         }
         if a.mode == Mode::Land {
-            let e = (a.anchor.x - self.est.p.x).hypot(a.anchor.z - self.est.p.z);
+            use land::*;
+            // the flown target: camera while it tracks the tag, GPS otherwise; a switch slews
+            let (want, cam) = self.pad_target(&a);
+            a.cam_tgt = cam;
+            if !a.tgt_init {
+                a.tgt = want;
+                a.tgt_init = true;
+            } else {
+                let dd = want - a.tgt;
+                let st = TGT_SLEW * dt;
+                a.tgt = if dd.length() <= st { want } else { a.tgt + dd * (st / dd.length()) };
+            }
+            a.anchor = a.tgt;
+            tx = a.tgt.x;
+            tz = a.tgt.z;
+            let e = (a.tgt.x - self.est.p.x).hypot(a.tgt.z - self.est.p.z);
             let hs = self.est.v.hyp_xz();
-            if !a.descending && e < 0.3 && hs < 0.35 {
+            if e > R_APP {
+                let h = cruise_height(e, a.land_h).min(a.land_cap).max(a.land_h);
+                let tr = self.transit(&mut a, tx, tz, h);
+                vd = Some(tr.vd);
+                ffx = tr.ff.0;
+                ffz = tr.ff.1;
+                alt_t = tr.alt_t;
+                lim = LIM * DEG;
+                if tr.climbing {
+                    vz_des = Some(clamp(1.2 * (alt_t - alt), -1.5, CLIMB_VZ));
+                }
+            } else {
+                // gentle approach and final hover: nose to the landing heading once slow
+                alt_t = a.land_h.min(a.land_cap.max(a.land_h)).max(if a.descending { 0.0 } else { a.land_h });
+                if hs < YAW_V - 0.5 {
+                    a.track_yaw = false;
+                }
+                if !a.track_yaw {
+                    a.heading = self.land_heading();
+                }
+                if a.descending && e > E_PAUSE && alt > 1.0 {
+                    // target moved (camera lost / reacquired): hold this height and line up again
+                    a.descending = false;
+                    a.land_h = alt;
+                    alt_t = alt;
+                }
+            }
+            let e_ok = if cam { E_DESC_CAM } else { E_DESC };
+            let hdg_ok = wrap(a.heading - heading_of(est_q)).abs() < HDG_DESC * DEG;
+            if !a.descending && e < e_ok && hs < HS_DESC && hdg_ok && (alt - a.land_h).abs() < 0.6 {
                 a.descending = true;
             }
             if a.descending {
                 vz_des = Some(-(0.45 * alt).min(1.1).max(0.35));
+                // stiffer position hold over the pad in the descent (gusts near the ground)
+                kp = KP_DESC;
+                vmax = 1.0;
+                kv = KV_DESC;
             }
             if self.h.grounded && a.descending {
                 // on the skids: lower collective and finish
@@ -647,8 +860,7 @@ impl Sim {
                 if self.est.bat <= 0.15 {
                     let forced = a.was_forced || self.est.bat <= 0.08;
                     self.start_auto(Mode::Land, true, forced, true, true);
-                    let p = self.auto.as_ref().and_then(|x| x.pad).unwrap_or(0);
-                    self.toast("Recovered", format!("Battery low. Landing on Pad {}", PADS[p].name), "good");
+                    self.toast("Recovered", "Battery low. Landing on the pad", "good");
                 } else {
                     a.mode = Mode::Hold;
                     a.anchor = v3(self.est.p.x, 0.0, self.est.p.z);
@@ -687,7 +899,7 @@ impl Sim {
             }
         }
         if a.mode == Mode::Autorot {
-            let p = &PADS[a.pad.unwrap_or(0)];
+            let (p, _) = self.pad_target(&a);
             let (dxp, dzp) = (p.x - self.est.p.x, p.z - self.est.p.z);
             let d = dxp.hypot(dzp);
             let hs = self.est.v.hyp_xz();
@@ -701,6 +913,19 @@ impl Sim {
                 alt_t = a.entry_alt;
                 vmax = 5.0;
                 let de = (tx - self.est.p.x).hypot(tz - self.est.p.z);
+                if de > land::R_APP {
+                    // same transit as LAND: climb clear of the trees first, then fast to the entry
+                    let h_tr = a.entry_alt.min(land::H_FAR);
+                    let tr = self.transit(&mut a, tx, tz, h_tr);
+                    vd = Some(tr.vd);
+                    ffx = tr.ff.0;
+                    ffz = tr.ff.1;
+                    lim = land::LIM * DEG;
+                    alt_t = a.entry_alt;
+                    if tr.climbing {
+                        vz_des = Some(clamp(1.2 * (a.entry_alt - alt), -1.5, land::CLIMB_VZ));
+                    }
+                }
                 if de < 10.0 {
                     a.heading = (-(p.x - self.est.p.x)).atan2(-(p.z - self.est.p.z));
                 }
@@ -723,7 +948,7 @@ impl Sim {
                     a.glide_n = 0;
                     a.glide_vy = 0.0;
                     a.glide_hs = 0.0;
-                    self.toast("Autorotation", format!("Motor cut. Gliding to Pad {}.", p.name), "");
+                    self.toast("Autorotation", "Motor cut. Gliding to the pad.", "");
                 }
             }
             if a.ar_unpowered() {
@@ -791,7 +1016,7 @@ impl Sim {
         let est = &self.est;
         // horizontal: position -> velocity -> acceleration -> tilt
         let (vdx, vdz) = vd.unwrap_or_else(|| {
-            let (mut x, mut z) = (0.9 * (tx - est.p.x), 0.9 * (tz - est.p.z));
+            let (mut x, mut z) = (kp * (tx - est.p.x), kp * (tz - est.p.z));
             let vm = x.hypot(z);
             if vm > vmax {
                 x *= vmax / vm;

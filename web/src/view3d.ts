@@ -6,7 +6,12 @@ import { THREE } from './three';
 import type { Frame } from './engine';
 
 const ROTOR_R = 0.68, MAST_H = 0.29, PAD_R = 1.0;
-const PADS = [{ name: 'A', x: 0, z: 0, color: '#ff7a1a' }, { name: 'B', x: 6, z: -6, color: '#4fb6ff' }];
+/** the single pad at the origin; TAG = side of the black tag square (matches heli::TAG_SIZE) */
+const PAD = { x: 0, z: 0, color: '#ff7a1a' }, TAG = 0.9;
+/** downward camera: 70 deg horizontal FOV, 4:3, mounted under the fuselage (precland::cam::MOUNT) */
+const CAM_HFOV = 70, CAM_MOUNT = [0, -0.15, -0.05];
+/** 6 x 6 tag payload inside a one-cell black border (8 x 8 cells), AprilTag style */
+const TAG_BITS = ['110010', '011101', '100110', '001011', '111000', '010111'];
 
 export class View3D {
   private renderer: InstanceType<typeof THREE.WebGLRenderer>;
@@ -27,6 +32,8 @@ export class View3D {
   private camPos = new THREE.Vector3(0, 1.7, 9);
   private camLook = new THREE.Vector3(0, 0.29, 0);
   private spin = 0; private tspin = 0;
+  /** downward camera for the picture-in-picture */
+  private dcam = new THREE.PerspectiveCamera(2 * Math.atan(Math.tan(CAM_HFOV * Math.PI / 360) * 0.75) * 180 / Math.PI, 4 / 3, 0.05, 120);
 
   constructor(private host: HTMLElement) {
     const r = new THREE.WebGLRenderer({ antialias: true });
@@ -66,16 +73,20 @@ export class View3D {
       const g = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshLambertMaterial({ map: tex }));
       g.rotation.x = -Math.PI / 2; g.receiveShadow = true; scene.add(g);
     }
-    // pads
-    for (const p of PADS) {
-      const c = document.createElement('canvas'); c.width = c.height = 256; const x = c.getContext('2d')!;
-      x.fillStyle = '#d9d6cc'; x.beginPath(); x.arc(128, 128, 126, 0, 7); x.fill();
-      x.strokeStyle = p.color; x.lineWidth = 14; x.beginPath(); x.arc(128, 128, 110, 0, 7); x.stroke();
-      x.fillStyle = '#2b2b2b'; x.font = '700 120px Barlow Condensed, Arial Narrow, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
-      x.fillText('H', 128, 122); x.fillStyle = p.color; x.font = '700 40px Barlow Condensed, Arial, sans-serif'; x.fillText(p.name, 128, 205);
-      const tex = new THREE.CanvasTexture(c); tex.encoding = THREE.sRGBEncoding;
-      const m = new THREE.Mesh(new THREE.CircleGeometry(PAD_R, 48), new THREE.MeshLambertMaterial({ map: tex }));
-      m.rotation.x = -Math.PI / 2; m.position.set(p.x, 0.006, p.z); m.receiveShadow = true; scene.add(m);
+    // the pad: coloured ring and an AprilTag-style marker (8 x 8 cells: black border, 6 x 6 payload)
+    {
+      const c = document.createElement('canvas'); c.width = c.height = 512; const x = c.getContext('2d')!;
+      x.fillStyle = '#d9d6cc'; x.beginPath(); x.arc(256, 256, 252, 0, 7); x.fill();
+      x.strokeStyle = PAD.color; x.lineWidth = 26; x.beginPath(); x.arc(256, 256, 226, 0, 7); x.stroke();
+      // tag square of side TAG m on a pad of radius PAD_R: 256 * TAG / PAD_R px, with a white quiet zone
+      const side = 256 * TAG / PAD_R, cell = side / 8, o = 256 - side / 2;
+      x.fillStyle = '#f4f2ea'; x.fillRect(o - cell * 0.6, o - cell * 0.6, side + cell * 1.2, side + cell * 1.2);
+      x.fillStyle = '#111'; x.fillRect(o, o, side, side);
+      x.fillStyle = '#f4f2ea';
+      TAG_BITS.forEach((r, j) => { for (let i = 0; i < 6; i++) if (r[i] === '1') x.fillRect(o + (i + 1) * cell, o + (j + 1) * cell, cell + 0.5, cell + 0.5); });
+      const tex = new THREE.CanvasTexture(c); tex.encoding = THREE.sRGBEncoding; tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+      const m = new THREE.Mesh(new THREE.CircleGeometry(PAD_R, 64), new THREE.MeshLambertMaterial({ map: tex }));
+      m.rotation.x = -Math.PI / 2; m.position.set(PAD.x, 0.006, PAD.z); m.receiveShadow = true; scene.add(m);
     }
     // flight line rope + posts between pilot and pads, cones
     {
@@ -84,7 +95,7 @@ export class View3D {
       const rope = new THREE.Mesh(new THREE.BoxGeometry(24, 0.02, 0.02), new THREE.MeshBasicMaterial({ color: 0xffd23c }));
       rope.position.set(0, 0.85, 6.5); scene.add(rope);
       const coneG = new THREE.ConeGeometry(0.15, 0.35, 12), coneM = new THREE.MeshLambertMaterial({ color: 0xff6a1f });
-      for (const [x, z] of [[-3, -3], [3, -3], [10, -10], [-8, -12], [14, -2]]) { const m = new THREE.Mesh(coneG, coneM); m.position.set(x, 0.175, z); m.castShadow = true; scene.add(m); }
+      for (const [x, z] of [[-3, -3], [3, -3], [10, -10], [-8, -12], [14, -2], [-10, -20], [14, -20]]) { const m = new THREE.Mesh(coneG, coneM); m.position.set(x, 0.175, z); m.castShadow = true; scene.add(m); }
     }
     // tree ring (instanced)
     {
@@ -180,7 +191,8 @@ export class View3D {
       camPos.lerp(want, Math.min(1, dt * 3)); camLook.lerp(target, Math.min(1, dt * 10));
       camera.fov += (55 - camera.fov) * Math.min(1, dt * 3);
     } else {
-      camPos.set(PADS[1].x + 3.5, 1.2, PADS[1].z + 3.5);
+      // pad close-up: low beside the pad, looking at the heli
+      camPos.set(PAD.x - 3.2, 1.0, PAD.z + 2.6);
       camLook.lerp(target, Math.min(1, dt * 10));
       const d = camPos.distanceTo(target);
       camera.fov += (clamp(2 * Math.atan(3 / d) * 180 / Math.PI, 18, 60) - camera.fov) * Math.min(1, dt * 3);
@@ -188,7 +200,25 @@ export class View3D {
     camera.position.copy(camPos); camera.lookAt(camLook); camera.updateProjectionMatrix();
   }
 
-  render(f: Frame, dt: number, nowMs: number) {
+  /** downward camera into a viewport over the PiP box (scissored, same renderer) */
+  private renderPip(f: Frame, box: HTMLElement) {
+    const r = this.renderer, host = this.host.getBoundingClientRect(), b = box.getBoundingClientRect();
+    if (b.width < 4 || b.height < 4) return;
+    const q = new THREE.Quaternion(f.q[0], f.q[1], f.q[2], f.q[3]);
+    const off = new THREE.Vector3(CAM_MOUNT[0], CAM_MOUNT[1], CAM_MOUNT[2]).applyQuaternion(q);
+    const c = this.dcam;
+    c.position.set(f.p[0] + off.x, f.p[1] + off.y, f.p[2] + off.z);
+    // looking down the body -y axis, image up = nose (-z): a camera rotated -90 deg about body x
+    c.quaternion.copy(q).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2));
+    const x = b.left - host.left, y = host.bottom - b.bottom;
+    r.setScissorTest(true); r.setScissor(x, y, b.width, b.height); r.setViewport(x, y, b.width, b.height);
+    const vis = this.heli.visible; this.heli.visible = false; this.ghost.visible = false; this.sigRing.visible = false;
+    r.render(this.scene, c);
+    this.heli.visible = vis;
+    r.setScissorTest(false); r.setViewport(0, 0, host.width, host.height);
+  }
+
+  render(f: Frame, dt: number, nowMs: number, pip?: HTMLElement | null) {
     const { heli, ghost } = this;
     heli.position.set(f.p[0], f.p[1], f.p[2]); heli.quaternion.set(f.q[0], f.q[1], f.q[2], f.q[3]);
     ghost.visible = f.real;
@@ -206,5 +236,10 @@ export class View3D {
     this.sun.position.set(f.p[0] + 8, f.p[1] + 18, f.p[2] + 5); this.sun.target.position.set(f.p[0], f.p[1], f.p[2]);
     this.updateCamera(f, dt);
     this.renderer.render(this.scene, this.camera);
+    if (pip && f.pip) {
+      const ghostVis = this.ghost.visible, ringVis = this.sigRing.visible;
+      this.renderPip(f, pip);
+      this.ghost.visible = ghostVis; this.sigRing.visible = ringVis;
+    }
   }
 }

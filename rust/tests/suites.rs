@@ -221,7 +221,7 @@ fn t1_takeoff_circuit_land_failsafe() {
     println!("RUST LAND touchdown {:.2} m/s | {} | crashed {}", t.s.h.last_impact, t.last_toast(), t.s.h.crashed);
     assert!(!t.s.h.crashed);
     assert!(t.s.h.last_impact < 0.5);
-    assert!(t.last_toast().contains("on Pad A"));
+    assert!(t.last_toast().contains("on the pad"));
 
     // circuit until the low-battery failsafe takes over
     t.wait(3.0);
@@ -251,7 +251,7 @@ fn t1_takeoff_circuit_land_failsafe() {
         t.cue()
     );
     assert!((0.135..0.155).contains(&fb));
-    assert!(t.cue().contains("Battery low: autopilot landing on Pad A"));
+    assert!(t.cue().contains("Battery low: autopilot landing on the pad"));
     let landings0 = t.s.landings;
     t.run(60.0, |t| t.s.landings > landings0);
     println!("RUST FAILSAFE LAND touchdown {:.2} m/s | {} | crashed {}", t.s.h.last_impact, t.last_toast(), t.s.h.crashed);
@@ -867,7 +867,7 @@ fn t5_real_land_runs() {
         t.run(40.0, |t| (t.s.h.grounded && t.s.h.airborne) || t.s.h.crashed);
         let d = t.s.h.p.x.hypot(t.s.h.p.z);
         println!(
-            "RUST REAL land run {}: touchdown {:.2} m/s, {:.2} m from Pad A centre, crashed {}",
+            "RUST REAL land run {}: touchdown {:.2} m/s, {:.2} m from the pad centre, crashed {}",
             i + 1,
             t.s.h.last_impact,
             d,
@@ -2514,4 +2514,222 @@ fn t9_tail_rate() {
     t.run(15.0, |t| { mx = mx.max(deg(wrap(heading_of(t.s.h.q) - h0)).abs()); false });
     println!("RUST ASSIST tail RATE setting, autopilot hover hold: heading max change {mx:.1}°");
     assert!(mx < 3.0);
+}
+
+// =====================================================================================
+// LAND transit (fast and high when far) and the downward camera precision landing
+// =====================================================================================
+#[derive(Debug, Default)]
+struct LandRes {
+    t: f64,
+    hmin: f64,
+    hmax: f64,
+    vmax: f64,
+    vs: f64,
+    d: f64,
+    rescues: u32,
+    crashed: bool,
+    cam_at_td: bool,
+    fused: u32,
+    fake_fused: u32,
+    max_tilt_low: f64,
+}
+
+/// Hover at (px, pz, 5 m), then LAND; `hook` runs every step (camera failures etc.).
+fn land_from(seed: u64, px: f64, pz: f64, real: bool, cam: bool, wind: usize, mut hook: impl FnMut(&mut Sim, f64)) -> LandRes {
+    let mut s = Sim::new(seed);
+    s.set.wind = wind;
+    if real {
+        s.command(Command::Sensors);
+    }
+    s.sens.cam.enabled = cam;
+    s.command(Command::Takeoff);
+    fly(&mut s, 25.0, |_| (0.0, 0.0, 0.0, None), |s| mode_of(s) == Some(Mode::Hold));
+    {
+        let a = s.auto.as_mut().unwrap();
+        a.anchor = v3(px, 0.0, pz);
+        a.alt = 5.0;
+    }
+    fly(&mut s, 60.0, |_| (0.0, 0.0, 0.0, None), |s| (s.h.p.x - px).hypot(s.h.p.z - pz) < 0.5 && s.h.v.hyp_xz() < 0.3 && (s.h.alt() - 5.0).abs() < 0.3);
+    fly(&mut s, 3.0, |_| (0.0, 0.0, 0.0, None), |_| false);
+    let (r0, t0) = (s.rescues, s.sim_t);
+    s.command(Command::Land);
+    let mut r = LandRes { hmin: 1e9, ..Default::default() };
+    for _ in 0..(120.0 / DT) as u64 {
+        let t = s.sim_t - t0;
+        hook(&mut s, t);
+        s.step(DT);
+        let s = &s;
+        let d = s.h.p.x.hypot(s.h.p.z);
+        if d > 5.0 {
+            r.hmin = r.hmin.min(s.h.alt());
+            r.hmax = r.hmax.max(s.h.alt());
+        }
+        if s.h.alt() < 2.0 {
+            r.max_tilt_low = r.max_tilt_low.max(s.h.tilt_deg());
+        }
+        r.vmax = r.vmax.max(s.h.v.hyp_xz());
+        r.cam_at_td = s.auto.as_ref().is_some_and(|a| a.cam_tgt);
+        if (s.h.grounded && s.h.airborne) || s.h.crashed {
+            break;
+        }
+    }
+    r.t = s.sim_t - t0;
+    r.vs = s.h.last_impact;
+    r.d = s.h.p.x.hypot(s.h.p.z);
+    r.rescues = s.rescues - r0;
+    r.crashed = s.h.crashed;
+    r.fused = s.sens.pl.n_fused;
+    r.fake_fused = s.sens.pl.n_fake_fused;
+    r
+}
+
+const LAND_SEEDS: std::ops::Range<u64> = 1000..1005;
+
+fn land_line(tag: &str, rs: &[LandRes]) {
+    let st = |f: &dyn Fn(&LandRes) -> f64| {
+        let mut s = Stat::new();
+        for r in rs {
+            s.add(f(r));
+        }
+        s
+    };
+    let (t, hmin, hmax, vmax, vs, d) = (st(&|r| r.t), st(&|r| r.hmin), st(&|r| r.hmax), st(&|r| r.vmax), st(&|r| r.vs), st(&|r| r.d));
+    println!(
+        "RUST LANDX {tag}: time {:.1}-{:.1} s (mean {:.1}) | transit alt {:.1}-{:.1} m | max speed {:.1}-{:.1} m/s | touchdown {:.2}-{:.2} m/s | {:.2}-{:.2} m from centre (mean {:.2}) | rescues {} | crashes {}",
+        t.mn, t.mx, t.mean(), if hmin.mn > 1e8 { 0.0 } else { hmin.mn }, hmax.mx, vmax.mn, vmax.mx, vs.mn, vs.mx, d.mn, d.mx, d.mean(),
+        rs.iter().map(|r| r.rescues).sum::<u32>(), rs.iter().filter(|r| r.crashed).count()
+    );
+}
+
+/// LAND from 30 m and 45 m, IDEAL and REAL EKF, 5 seeds each: faster, higher in transit, soft, no rescue.
+#[test]
+fn t10_land_transit() {
+    for real in [false, true] {
+        for (px, pz, dist) in [(-26.0, -15.0, 30.0), (-38.0, -24.0, 45.0)] {
+            let rs: Vec<LandRes> = LAND_SEEDS.map(|sd| land_from(sd, px, pz, real, true, 1, |_, _| {})).collect();
+            land_line(&format!("{} from {dist} m", if real { "REAL EKF" } else { "IDEAL" }), &rs);
+            // before: 20.4 s (30 m) and 26.3 s (45 m) IDEAL at 5 m and 2.5 m/s
+            let t_max = if dist > 40.0 { 23.0 + if real { 4.0 } else { 0.0 } } else { 18.0 + if real { 3.0 } else { 0.0 } };
+            for r in &rs {
+                assert!(!r.crashed && r.rescues == 0, "{r:?}");
+                assert!(r.vs < 0.6 && r.d < if real { 0.5 } else { 0.15 }, "{r:?}");
+                assert!(r.t < t_max, "{dist} m: {} s", r.t);
+                assert!(r.hmin > 4.3 && r.vmax > 5.0 && r.vmax < 8.6, "{r:?}");
+                // clear of the 12 m trees at r >= 45 m, high enough to pass over 8 m bushes nearer in
+                assert!(r.hmax > if dist > 40.0 { 11.5 } else { 10.0 } && r.hmax < 13.0, "{r:?}");
+            }
+        }
+    }
+    // tailwind and headwind (gusty, 4.5 m/s from +x): stops on the pad, no overshoot rescue
+    for (px, pz, what) in [(38.0, -24.0, "tailwind"), (-38.0, -24.0, "headwind")] {
+        let rs: Vec<LandRes> = LAND_SEEDS.take(3).map(|sd| land_from(sd, px, pz, false, true, 2, |_, _| {})).collect();
+        land_line(&format!("IDEAL gusty {what} from 45 m"), &rs);
+        for r in &rs {
+            assert!(!r.crashed && r.rescues == 0 && r.vs < 0.6 && r.d < 0.3, "{r:?}");
+        }
+    }
+    // short hop from 3.6 m: gentle approach as before, no climb
+    let rs: Vec<LandRes> = LAND_SEEDS.take(3).map(|sd| land_from(sd, 3.0, -2.0, true, true, 1, |_, _| {})).collect();
+    land_line("REAL short hop 3.6 m", &rs);
+    for r in &rs {
+        assert!(!r.crashed && r.rescues == 0 && r.vs < 0.6, "{r:?}");
+    }
+}
+
+/// Camera precision landing vs GPS only (camera disabled), REAL EKF, 8 seeds, 30 m and the pad hover.
+#[test]
+fn t10_precland_accuracy() {
+    let seeds = 1010u64..1018;
+    for (px, pz, dist) in [(-26.0, -15.0, "30 m"), (2.0, -3.0, "3.6 m")] {
+        let cam: Vec<LandRes> = seeds.clone().map(|sd| land_from(sd, px, pz, true, true, 1, |_, _| {})).collect();
+        let gps: Vec<LandRes> = seeds.clone().map(|sd| land_from(sd, px, pz, true, false, 1, |_, _| {})).collect();
+        land_line(&format!("REAL camera from {dist}"), &cam);
+        land_line(&format!("REAL GPS only from {dist}"), &gps);
+        let mean = |v: &[LandRes]| v.iter().map(|r| r.d).sum::<f64>() / v.len() as f64;
+        let (mc, mg) = (mean(&cam), mean(&gps));
+        for r in cam.iter().chain(gps.iter()) {
+            assert!(!r.crashed && r.rescues == 0 && r.vs < 0.6, "{r:?}");
+        }
+        for r in &cam {
+            assert!(r.d < 0.3 && r.fused > 20, "camera landing {r:?}");
+        }
+        assert!(mc < 0.2 && mc < 0.6 * mg, "camera {mc:.2} m vs GPS {mg:.2} m");
+    }
+}
+
+/// Camera blocked mid-approach (falls back to GPS and still lands softly), camera noise-only
+/// fakes and a persistent offset fake (gated, doesn't drag the landing), gusty camera landings.
+#[test]
+fn t10_precland_failures() {
+    // blocked at 3 m on the way down (and at 20 m out in the transit for the second set)
+    for (when, what) in [(0, "blocked in the descent at 3 m"), (1, "blocked from 8 s (approach)")] {
+        let rs: Vec<LandRes> = (1020u64..1025)
+            .map(|sd| {
+                land_from(sd, -26.0, -15.0, true, true, 1, move |s, t| {
+                    if (when == 0 && s.auto.as_ref().is_some_and(|a| a.descending) && s.h.alt() < 3.0) || (when == 1 && t > 8.0) {
+                        s.sens.cam.enabled = false;
+                    }
+                })
+            })
+            .collect();
+        land_line(&format!("REAL camera {what}"), &rs);
+        for r in &rs {
+            // GPS accuracy (as t7_ekf_land_autorotate), flying the GPS target at touchdown
+            assert!(!r.crashed && r.rescues == 0 && r.vs < 0.6 && r.d < 1.2, "{r:?}");
+            assert!(!r.cam_at_td || when == 0, "{r:?}");
+        }
+    }
+    // persistent false detections 1.2 m off the tag in 25% of the frames: rejected by the gate
+    let rs: Vec<LandRes> = (1030u64..1035)
+        .map(|sd| land_from(sd, -26.0, -15.0, true, true, 1, |s, _| s.sens.cam.fake_hook = Some((1.2, 0.0, 0.25))))
+        .collect();
+    land_line("REAL camera with 25% false detections 1.2 m off", &rs);
+    for r in &rs {
+        assert!(!r.crashed && r.rescues == 0 && r.vs < 0.6 && r.d < 0.35, "{r:?}");
+        assert!(r.fake_fused * 10 < r.fused, "fakes fused {} of {}", r.fake_fused, r.fused);
+    }
+    // gusty, camera vs GPS
+    let cam: Vec<LandRes> = (1040u64..1045).map(|sd| land_from(sd, -26.0, -15.0, true, true, 2, |_, _| {})).collect();
+    let gps: Vec<LandRes> = (1040u64..1045).map(|sd| land_from(sd, -26.0, -15.0, true, false, 2, |_, _| {})).collect();
+    land_line("REAL gusty camera from 30 m", &cam);
+    land_line("REAL gusty GPS only from 30 m", &gps);
+    for r in cam.iter().chain(gps.iter()) {
+        assert!(!r.crashed && r.rescues == 0 && r.vs < 0.9, "{r:?}");
+    }
+}
+
+/// Camera model geometry: detection range and limits.
+#[test]
+fn t10_camera_model() {
+    use helisim::heli::Heli;
+    use helisim::precland::Camera;
+    let mut c = Camera::new(1);
+    let mut h = Heli::new();
+    let seen = |c: &mut Camera, h: &Heli| {
+        let mut n = 0;
+        for k in 0..40 {
+            n += c.step(k as f64 * 0.05 + 0.001, h).iter().filter(|d| !d.fake).count();
+        }
+        c.reset(0.0);
+        n
+    };
+    let mut lo = vec![];
+    for (alt, x, tilt, rate, want) in [
+        (5.0, 0.0, 0.0, 0.0, true),
+        (25.0, 0.0, 0.0, 0.0, true),   // tag 16 px
+        (40.0, 0.0, 0.0, 0.0, false),  // tag 10 px: too small
+        (0.4, 0.0, 0.0, 0.0, false),   // tag fills the image
+        (5.0, 3.6, 0.0, 0.0, false),   // centre outside the 70 deg field of view
+        (5.0, 0.0, 40.0, 0.0, false),  // tilt over 35 deg
+        (5.0, 0.0, 0.0, 3.0, false),   // motion blur
+    ] {
+        h.p = v3(x, alt + 0.29, 0.0);
+        h.q = Quat::axis_angle(v3(1.0, 0.0, 0.0), tilt * helisim::units::DEG);
+        h.w = v3(rate, 0.0, 0.0);
+        let n = seen(&mut c, &h);
+        lo.push(format!("alt {alt} x {x} tilt {tilt} rate {rate}: {n} of 39"));
+        assert_eq!(n > 20, want, "{alt} {x} {tilt} {rate}: {n}");
+    }
+    println!("RUST CAMERA geometry: {}", lo.join(" | "));
 }

@@ -177,7 +177,34 @@ fn write_frame(s: &mut Sim, j: &mut Json) {
     j.str("resc", &hud.resc);
     j.str("cue", &hud.cue);
     j.str("sens", &hud.sens);
+    j.bool("rpmShow", hud.rpm_show);
+    j.str("health", hud.health.0);
+    j.str("healthC", hud.health.1);
     j.end_obj();
+    // downward camera picture-in-picture: shown, lock state, last detection box (image px of a
+    // 640 x 480 frame, recent only), camera mount for the TS camera
+    j.bool("pip", s.pip_show());
+    j.bool("pipSet", s.set.pip);
+    {
+        let pl = &s.sens.pl;
+        j.str("camSt", pl.status(s.sens.cam.enabled));
+        j.int("camN", s.sens.cam.n_det as i64);
+        j.bool("camLock", s.sens.cam.enabled && pl.tracking());
+        j.bool("camTgt", s.auto.as_ref().is_some_and(|a| a.cam_tgt));
+        match pl.last_det {
+            Some((t, d)) if s.sim_t - t < 0.25 => {
+                j.arr("camDet");
+                for v in [d.u, d.v, d.span, d.yaw] {
+                    j.raw_num_item(v);
+                }
+                j.end_arr();
+            }
+            _ => {
+                j.arr("camDet");
+                j.end_arr();
+            }
+        }
+    }
     // toasts raised since the last frame
     j.bool("toastClear", s.toast_clear);
     j.arr("toasts");
@@ -186,6 +213,7 @@ fn write_frame(s: &mut Sim, j: &mut Json) {
         j.str("t", &t.title);
         j.str("s", &t.sub);
         j.str("k", t.kind);
+        j.bool("ev", t.ev);
         j.end_obj();
     }
     j.end_arr();

@@ -5,12 +5,14 @@
 A 600-class flybarless RC helicopter on a flying field, seen from the pilot station. You fly it with two
 on-screen gimbals (Mode 2), the keyboard or a USB transmitter / gamepad, or let the autopilot take off,
 hold, fly racetrack laps, land or demonstrate an autorotation. Crash protection, a low-battery failsafe
-and a REAL sensor mode (the flight controller flies on noisy, delayed sensors) are modelled.
+and a REAL sensor mode (the flight controller flies on noisy, delayed sensors, including a downward
+camera that finds the tag on the pad for precision landings) are modelled. There is one landing pad, in
+front of the pilot station.
 
 This is a port of the single-file JavaScript page (`rc-heli-field.html`, three.js r128) to the same
 architecture as the circuit autopilot project: a Rust core compiled to WebAssembly owns all simulation,
 control, autopilot, sensor and rule logic, and a TypeScript page only renders, gathers input and calls
-the exports. The built page is one self-contained HTML file of about 120 KB.
+the exports. The built page is one self-contained HTML file of about 139 KB.
 
 ## Layout
 
@@ -18,7 +20,7 @@ the exports. The built page is one self-contained HTML file of about 120 KB.
 |---|---|
 | `rust/` | crate `helisim`: lib (rlib + cdylib) and a native `helisim` bin for quick runs |
 | `rust/tests/suites.rs` | native ports of the JS harnesses test.js .. test5.js, with asserts |
-| `rust/examples/` | `stunt_dev` (trace one stunt), `inv_diag` (per-seed EKF diagnostics through a stunt: bias, tilt, velocity errors, fusion counts) |
+| `rust/examples/` | `stunt_dev` (trace one stunt), `inv_diag` (per-seed EKF diagnostics through a stunt: bias, tilt, velocity errors, fusion counts), `land_far` (LAND from 30 / 45 m, 5 seeds: time, heights, accuracy; `real`, `nocam`), `land_trace` (one LAND traced every 0.5 s with the camera target error), `fs_far` (battery failsafe far from the pad) |
 | `web/page.html` | all CSS and DOM of the original page, three.js r128 from cdnjs, `/*WASM*/` and `/*BUNDLE*/` placeholders |
 | `web/src/` | TypeScript UI (below) |
 | `web/build.sh` | Rust -> wasm32, wasm-opt, tsc, esbuild, embed -> `rc-heli-field.html` |
@@ -38,10 +40,11 @@ the exports. The built page is one self-contained HTML file of about 120 KB.
 | `fbl` | rotor head (flapping disc, servos, hub moment, flapback, head bob) and the flybarless gyro: rate loop, self-level, heading-hold tail |
 | `assist` | flying assists: throttle curve, ALT HOLD, AUTO-YAW, tail RATE, ground-proximity predictor |
 | `stunt` | STUNTS: pirouette, loop, roll, flip, inverted hover; profiles, scoring, cue text |
-| `sensors` | gyro, accelerometer, magnetometer, rangefinder, barometer, GPS, ESC rpm and battery telemetry, each on its own clock |
+| `sensors` | gyro, accelerometer, magnetometer, rangefinder, barometer, GPS, ESC rpm and battery telemetry, each on its own clock; runs the camera and the target estimator |
+| `precland` | downward camera (pad tag detection from geometry) and the precision-landing target estimator |
 | `estimator` | BASIC complementary filter; `Est` is what every controller sees |
 | `ekf` | error-state extended Kalman filter (default in REAL mode), fixed-size 18-state matrix code, drag fusion with wind states, gating, GPS reset, health |
-| `autopilot` | takeoff, hold, circuit path follower, land, rescue, autorotation, battery failsafe |
+| `autopilot` | takeoff, hold, circuit path follower, land (wind-aware transit, camera precision landing), rescue, autorotation, battery failsafe |
 | `sim` | world step, commands, landing grading, toasts as an event list, HUD, cue and sensor-panel text |
 | `jsonw` | tiny JSON writer and JS-style `toFixed` (no serde_json, no core::fmt float code) |
 | `wasm` | C-ABI exports, one `Sim` in a thread_local RefCell |
@@ -52,9 +55,9 @@ the exports. The built page is one self-contained HTML file of about 120 KB.
 |---|---|
 | `engine.ts` | base64 -> DecompressionStream('gzip') -> WebAssembly.instantiate; wraps the exports; `Frame` type; command codes |
 | `input.ts` | touch gimbals, keys, gamepad axes (raw values only) |
-| `view3d.ts` | three.js scene, heli model, ghost, windsock, pilot / chase / pad-B cameras |
-| `hud.ts` | readouts, cue, sensor panel, toasts, button labels and states, all from the frame |
-| `main.ts` | wiring and the frame loop |
+| `view3d.ts` | three.js scene, the pad with its camera tag, heli model, ghost, windsock, pilot / chase / pad cameras, and the downward camera rendered into the picture-in-picture box (scissored viewport of the same renderer) |
+| `hud.ts` | readouts, status line, estimator pill and sensor panel, assist pills, event toasts, action bar and settings states, PiP detection box, all from the frame |
+| `main.ts` | wiring, the settings sheet (open / close / Esc), desktop tooltips, the frame loop |
 | `three.ts` | the global `THREE` from the script tag, typed with @types/three 0.128 |
 
 ### wasm interface
@@ -65,7 +68,7 @@ Only plain numbers cross the boundary.
 |---|---|
 | `sim_init(seed)` | new sim with a seed |
 | `sim_input(yaw, pit, rol, thrDelta, thrSet, gp, g0, g1, g2, g3)` | this frame's input; `thrSet` < 0 means the touch throttle did not move; `gp` = 1 with gamepad axes 0..3 |
-| `sim_cmd(code)` | 0 arm, 1 hold, 2 protect, 3 sensors, 4 level, 5 pitch, 6 wind, 7 cam, 8 reset, 9 takeoff, 10 circuit, 11 land, 12 autorotate, 13 takeover (a stick was touched), 14 estimator EKF / BASIC, 15 stunt picker toggle, 16..20 fly pirouette / loop / roll / flip / inverted hover, 21 close the picker, 22 ALT HOLD, 23 AUTO-YAW, 24 tail HOLD / RATE (codes 0..21 unchanged) |
+| `sim_cmd(code)` | 0 arm, 1 hold, 2 protect, 3 sensors, 4 level, 5 pitch, 6 wind, 7 cam, 8 reset, 9 takeoff, 10 circuit, 11 land, 12 autorotate, 13 takeover (a stick was touched), 14 estimator EKF / BASIC, 15 stunt picker toggle, 16..20 fly pirouette / loop / roll / flip / inverted hover, 21 close the picker, 22 ALT HOLD, 23 AUTO-YAW, 24 tail HOLD / RATE, 25 camera view AUTO / ALWAYS (codes 0..24 unchanged) |
 | `sim_step(n)` | n fixed steps of 1/240 s |
 | `sim_frame()` | builds the JSON frame, returns its length; read it at `sim_out_ptr()` |
 
@@ -73,7 +76,11 @@ Per animation frame the page sends input, runs the elapsed fixed steps (at most 
 dropped as before), reads one frame and renders it. The frame carries true and estimated pose, rotor
 rpm, wind, settings (including `ekf` and `sig2`, the 2-sigma horizontal uncertainty radius drawn as a ring around the ghost), the autopilot mode code, the gimbal positions to draw, the HUD strings with their
 colour classes, the cue line, the sensor panel and the toasts raised since the last frame. All text is
-decided in Rust; the page writes it to the DOM.
+decided in Rust; the page writes it to the DOM. New fields (all additions): `hud.rpmShow` (show the
+headspeed readout), `hud.health` / `hud.healthC` (the collapsed estimator pill), `pip` / `pipSet` (show the
+camera view, user setting), `camSt` / `camN` / `camLock` / `camTgt` (camera status, detections, tag locked,
+LAND flying the camera target), `camDet` (last detection `[u, v, span px, yaw]` of a 640 x 480 image, empty
+if none in the last 0.25 s) and `ev` on each toast (an event the page shows; see "Page layout").
 
 ## Models
 
@@ -143,7 +150,9 @@ Four skid points. On the ground, static friction 1.0 and kinetic 0.8 against the
 skids; the yaw integrator bleeds off and the skids stop pirouettes once 60% of the weight is on them.
 A crash is a touchdown faster than 3 m/s, more than 35 degrees of tilt with the rotor turning, or more
 than 3.2 m/s of sideways slide. Landings after more than 0.8 s in the air are graded Butter-soft
-(< 0.5 m/s), Soft (< 1), Firm (< 2) or Hard, and the best on-pad landing is kept.
+(< 0.5 m/s), Soft (< 1), Firm (< 2) or Hard, "on the pad" within 1 m of its centre, and the best on-pad landing
+is kept. The beginner goal (status line) is a manual flight that goes at least 8 m out and lands back on the
+pad under 1 m/s.
 
 ### Wind
 
@@ -162,6 +171,7 @@ CALM 0, BREEZE 2.2 m/s, GUSTY 4.5 m/s from the pilot's right, with a gust patter
 | GPS | 10 Hz, 150 ms latency | 0.4 m horizontal and 0.8 m vertical noise, wandering bias up to 1.2 m, 2..4 m glitches every 2..3 min, 11..17 sats |
 | ESC rpm | 10 Hz, 100 ms latency | 10 rpm steps, 0.6% noise, 2% dropped frames |
 | Battery | 10 Hz | 12S, OCV curve 3.2..4.2 V per cell, 0.025 ohm pack, 0.6 s low-pass, charge from load-compensated voltage with a slightly low 0.02 ohm estimate |
+| Downward camera | 20 Hz, 80 ms latency | 70 deg FOV, 640 x 480, under the fuselage; detects the pad tag from geometry, 0.7 px noise plus blur, 4% dropouts, rare false detections (see "Downward camera precision landing") |
 
 Two estimators run side by side on the same samples; ESTIMATOR (key E) picks the one the controllers
 read. Both are ignored in IDEAL mode, which hands the controllers the true state. Physics always runs
@@ -236,8 +246,8 @@ estimators (means over all samples of all 5 runs, max in brackets).
 | GPS glitch 3.5 m / 2.5 s: true heli moved | 0.48 (0.71) m, back to 0.29 m | 2.45 (2.78) m, back to 0.33 m |
 | ... EKF rejections | 109 of 125 glitched samples; the 2 s reset fires once into the glitch and once back out (10 resets in 5 runs), each shifting the hold target with the estimate | |
 | GPS glitch 6 m / 8 s (reset path) | moved 0.58 (0.81) m, back to 0.30 m; 2 resets per run, no crash | moved 6.07 (6.28) m, back to 0.47 m |
-| LAND x5: touchdown / from pad centre | 0.29-0.36 m/s / 0.22-0.64 m | 0.34-0.39 m/s / 0.05-0.68 m |
-| AUTOROTATE x5: touchdown / from pad | 0.59-0.65 m/s / 0.95-2.24 m, 0 rescues | 0.66-0.84 m/s / 1.48-2.38 m, 0 rescues |
+| LAND x5: touchdown / from pad centre | 0.29-0.41 m/s / 0.07-0.26 m (camera; GPS only it was 0.22-0.64 m) | 0.23-0.40 m/s / 0.05-0.37 m (camera; was 0.05-0.68 m) |
+| AUTOROTATE x5: touchdown / from pad | 0.55-0.60 m/s / 0.99-1.52 m, 0 rescues (was 0.59-0.65 / 0.95-2.24) | 0.61-0.74 m/s / 2.11-3.00 m, 0 rescues (was 0.66-0.84 / 1.48-2.38) |
 | Crash protection, full roll at 8 m x5 | trigger +0.29 s, min alt 7.70-8.11 m, hold after 1.46-1.62 s | trigger +0.30 s, min alt 7.42-7.83 m, hold after 1.41-1.57 s |
 
 10 minutes (60 s hover then circuit laps, 5 seeds, EKF): finite throughout, covariance diagonal
@@ -332,10 +342,10 @@ regressed: every other table in this README was rerun with the new filter.
 |---|---|
 | TAKEOFF / hold | spools up (soft start), climbs to 3 m, switches to hover hold 0.3 m below target |
 | CIRCUIT | climbs to 5 m, joins a rounded-rectangle racetrack (x -10..14, z -20..-4, 5 m corners, ~70 m) at 5 m/s with path curvature and turn rate fed forward; lap toasts; runs until LAND or a stick touch |
-| LAND | lines up over the nearest pad to 0.3 m and 0.35 m/s, then descends at `0.45 * alt` m/s clamped to 0.35..1.1 |
-| AUTOROTATE | climbs to 25 m at an entry point 38 m upwind of the pad, runs in at 7 m/s, cuts the motor (throttle hold), glides at 6..8 m/s with collective governing rpm to 99%, flares at 6 m, cushions at a steady 5.5 m/s2 deceleration, sets down near the pad |
+| LAND | flies back to the pad: beyond 5 m on a wind-aware speed profile (up to 8 m/s) at 8..12 m (climbing first if low), nose along the track, then the gentle approach; lines up over the pad (or the camera's tag target) to 0.3 m (0.12 m with the camera), 0.35 m/s and the landing heading, then descends at `0.45 * alt` m/s clamped to 0.35..1.1. See "LAND transit" |
+| AUTOROTATE | climbs to 25 m at an entry point 38 m upwind of the pad (the climb-out uses the LAND transit when it is more than 5 m away), runs in at 7 m/s, cuts the motor (throttle hold), glides at 6..8 m/s with collective governing rpm to 99%, flares at 6 m, cushions at a steady 5.5 m/s2 deceleration, sets down near the pad |
 | Rescue (PROTECT) | takes over on more than 55 degrees of bank (or inverted on a normal pitch curve), a sink that would hit within 1.4 s below 8 m, ground proximity (below), settling with power, or headspeed under 72% (65% / 45 degrees in an autorotation glide); rolls upright, stops the sink at full power, climbs to a hover and hands back control; hands-off for 1.5 s |
-| Battery failsafe | at 15% (2 s debounce) lands on the nearest pad, a stick touch takes over; at 8% forced landing that ignores sticks and keys |
+| Battery failsafe | at 15% (2 s debounce) lands on the pad (the same LAND, transit included), a stick touch takes over; at 8% forced landing that ignores sticks and keys (no climb above the height it is at) |
 
 | STUNTS (J) | picker of five manoeuvres, below |
 
@@ -437,6 +447,104 @@ and recovers (min 2.5 m IDEAL, 2.3 m REAL). A collective cut mid-roll triggers 1
 min 10.2 m) and 2.3 s in REAL ("Sinking", min 6.2 m), and recovers. With PROTECT off, both crash. Shortest-way rescue: rolled 150 deg ->
 recovers about roll (-155 deg), pitched 150 / -160 deg -> about pitch.
 
+### LAND transit (`autopilot::land`)
+
+LAND used to fly to the nearest pad at `0.9 * distance` m/s capped at 2.5 m/s, at the height where it
+started (2..5 m). From the far side of the field that took 26 s at 5 m, low over the 8..12 m tree ring.
+It now flies back fast and high, and keeps the gentle approach for the last 5 m.
+
+| | |
+|---|---|
+| Speed | beyond the 5 m approach radius `v = min(cap, sqrt(2 a (d - 5) + 2.5^2))`, a braking curve that meets the old 2.5 m/s approach speed at 5 m, so there is no step. `a = 1.5 m/s2` (the braking deceleration is fed forward). Inside 5 m the old `0.9 d`, max 2.5 m/s |
+| Wind | estimated wind along the track: a tailwind brakes earlier, `a x (1 - 0.08 x tailwind)`, at least `0.6 a`; into a headwind the ground speed cap is `min(8, 9 - headwind)` (airspeed at most 9 m/s) |
+| Height | 8 m beyond 15 m from the pad, rising linearly to 12 m at 30 m (clear of the 5..12 m trees at r >= 45 m around (0, -20)); between 10 and 5 m it comes down linearly to the approach height (the start height clamped to 3..5 m); the target never drops below the approach height before 5 m. More than 1.5 m below the profile it climbs first (horizontal speed capped at 2 m/s, climb up to 2.5 m/s). LAND from closer than 15 m, and the 8% forced landing, never climb above where they start |
+| Heading | nose along the track above 3 m/s (0.5 m/s hysteresis, the circuit's yaw law), then the landing heading for the final hover: the tag heading from the camera when it has locked, else the surveyed pad heading. The descent starts only within 10 deg of it |
+| Descent | as before (within 0.3 m and 0.35 m/s, `0.45 alt` clamped to 0.35..1.1 m/s), now with a stiffer position hold over the pad (position gain 1.5 instead of 0.9, velocity gain 2.2 instead of 1.6, 1 m/s max), which halved the drift on the way down in gusty wind. If the target moves more than 0.6 m away above 1 m (camera lost or reacquired), the descent pauses at that height and lines up again |
+| Ground proximity | the transit is level or climbing until 10 m out and slows below 2.5 m/s before the approach height, so the "Too low and fast" rule never sees a landing (0 rescues in every run below) |
+| Reused | the autorotation climb-out to its entry point (beyond 5 m) and both battery failsafe landings fly the same transit |
+
+`cargo test --release --test suites t10_land_transit -- --nocapture` (hover at 5 m at the start point,
+breeze, seeds 1000..1004; before = the same runs on the previous build, `examples/land_far`):
+
+| LAND from | before: time to touchdown | after: time | transit height | max ground speed | touchdown | from pad centre | rescues |
+|---|---|---|---|---|---|---|---|
+| 30 m, IDEAL | 20.4 s | **16.7 s** | 5.0 -> 10.8 m (before flat 5.0 m) | 6.2 m/s (before 2.5) | 0.35 m/s | 0.02 m | 0 |
+| 45 m, IDEAL | 26.3 s | **19.1 s** | 5.0 -> 12.1 m | 6.9-7.0 m/s | 0.35 m/s | 0.02-0.03 m | 0 |
+| 30 m, REAL EKF | 19.6-21.6 s | **17.9-19.2 s** | 4.9 -> 11.0 m | 5.9-6.4 m/s | 0.33-0.36 m/s | 0.07-0.21 m (before 0.24-0.89) | 0 |
+| 45 m, REAL EKF | 25.8-27.7 s | **20.6-24.7 s** | 4.9 -> 12.3 m | 6.8-7.0 m/s | 0.32-0.42 m/s | 0.02-0.23 m (before 0.16-0.66) | 0 |
+| 45 m, IDEAL gusty, tailwind (x3) | | 19.2 s | 5.0 -> 12.1 m | 7.7 m/s | 0.35 m/s | 0.07-0.08 m | 0 |
+| 45 m, IDEAL gusty, headwind (x3) | | 20.5 s | 5.0 -> 12.1 m | 5.4 m/s | 0.35 m/s | 0.01-0.03 m | 0 |
+| 3.6 m short hop, REAL (x3) | | 11.9-13.9 s | no climb | 2.2 m/s | 0.35-0.40 m/s | 0.06-0.16 m | 0 |
+
+The REAL runs take 1..3 s longer than IDEAL: the descent waits for the camera lock and the tighter 0.12 m
+line-up. The speed never reaches the 8 m/s cap from 45 m: the climb to 12 m comes first and the braking
+curve starts at 33 m out. Battery failsafe from (-30, -25) at 6 m (`examples/fs_far`): 15% IDEAL 22.0 s,
+REAL 24.8 s, 8% IDEAL 20.0 s, REAL 24.7 s; all butter-soft (0.33-0.35 m/s), 0.00-0.11 m from centre, 12.1-12.4 m
+max height, 0 rescues. The scripted IDEAL 8% forced landing in `t4_battery_ideal` (heli 67 m out) now
+reaches the pad before the pack is flat: 0.35 m/s on all 8 seeds 300..307, against 0.93..2.50 m/s on a
+coasting rotor before (the README note further down describes the old behaviour).
+
+### Downward camera precision landing (`precland`, REAL mode)
+
+The pad carries an AprilTag-style marker: a 0.9 m black square with a white 6 x 6 payload inside a
+one-cell border, on the light pad disc with the orange ring (the pad letter is gone with Pad B). The
+camera does not decode the payload; detection is from geometry.
+
+| Camera | |
+|---|---|
+| Mount | under the fuselage, 0.15 m below and 0.05 m ahead of the origin, looking down the body -y axis, image up = nose |
+| Optics | 640 x 480, 70 deg horizontal FOV (focal length 457 px), 20 Hz, 80 ms latency, 6 ms exposure |
+| Detected when | the tag centre is in the image, at least 85% of its area is in view (5 x 5 sample grid), it spans 12 px .. 90% of the image height (about 0.6 .. 35 m up, square root of the projected area), the true body tilt is under 35 deg, and the motion blur `(|w_xz| F + |w_y| r_px) x exposure` is under 6 px |
+| Output | tag centre (px) with 0.7 px + 0.25 px per px of blur Gaussian noise, tag yaw relative to the image (1 deg noise), span |
+| Failures | 4% of detectable frames dropped; 0.2% of frames above 0.5 m a false detection at a random spot (random size and yaw); test hooks: camera blocked (`sens.cam.enabled`), persistent fakes at a given ground offset and rate (`fake_hook`) |
+| Panel | `CAMERA SEARCHING / TRACKING / LOST / OFF · n det` in the sensor panel; the collapsed pill shows `CAMERA TRACKING` when nothing more urgent (GPS lost / reset / rejected) is going on |
+
+Fusion: a separate target estimator, as in ArduPilot's AC_PrecLand, rather than a state in the EKF. The
+pad is fixed in the world, so the only thing the camera adds is where the pad is in the flight controller's
+own (GPS-referenced, wandering) frame. A target estimate fused beside the EKF does exactly that, keeps the
+18-state filter unchanged (its 10-minute consistency, glitch and stunt results all still hold) and lets the
+autopilot fall back to GPS by simply not using it.
+
+| Target estimator | |
+|---|---|
+| State | pad position (x, z) in the estimate's world frame, isotropic variance; pad heading from the tag yaw (low-passed, 20 deg gate) |
+| Measurement | the pixel ray from the lens, rotated with the estimated attitude at the capture time (80 ms history of the estimate) and intersected with the ground at the estimated height (rangefinder-aided EKF height); sigma `slant x (pixel noise / F + EKF tilt sigma) + EKF height sigma x tan(off-axis) + 2 cm` |
+| Gate | normalised innovation squared against 11.8 (2 DOF, 3 sigma), like the GPS position gate |
+| Acquisition | 5 detections within 0.6 s that agree to 0.4 m, and agree with the prior (the surveyed pad in the GPS frame with the EKF position sigma) through the same gate: a lone false detection can't capture the target |
+| Process noise | 0.3 m/sqrt(s), capped at the prior: the target follows the GPS-referenced estimate as its bias wanders |
+| Reset | 8 rejected detections in 1.5 s with no fused one, consistent to 0.3 m: the target jumps to them (an EKF position reset also shifts it, with the autopilot targets) |
+| Use | LAND, the autorotation flare / cushion target and the battery landings fly the camera target while it was fused within 1 s (4 s below 1.5 m, where the tag no longer fits the image), else the surveyed pad position in the GPS frame. A switch between the two slews the flown target at 0.8 m/s |
+| Forget | no detection for 10 s: back to the GPS prior |
+
+`cargo test --release --test suites t10_precland -- --nocapture` (REAL EKF, breeze unless noted; camera off =
+`sens.cam.enabled = false`, the previous behaviour):
+
+| Case | seeds | from pad centre | touchdown | rescues |
+|---|---|---|---|---|
+| LAND from 30 m, camera | 1010..1017 | **0.03-0.25 m, mean 0.13** | 0.29-0.41 m/s | 0 |
+| LAND from 30 m, GPS only | 1010..1017 | 0.04-0.92 m, mean 0.36 | 0.31-0.43 m/s | 0 |
+| LAND from 3.6 m, camera | 1010..1017 | **0.04-0.22 m, mean 0.15** | 0.33-0.40 m/s | 0 |
+| LAND from 3.6 m, GPS only | 1010..1017 | 0.22-0.83 m, mean 0.53 | 0.31-0.43 m/s | 0 |
+| Camera blocked on the way down at 3 m | 1020..1024 | 0.33-0.88 m, mean 0.54 (GPS) | 0.30-0.37 m/s | 0 |
+| Camera blocked 8 s into the approach | 1020..1024 | 0.26-1.00 m, mean 0.61 (GPS) | 0.31-0.42 m/s | 0 |
+| 25% of frames a false detection 1.2 m off the tag | 1030..1034 | 0.05-0.20 m, mean 0.13 | 0.32-0.38 m/s | 0 |
+| Gusty (4.5 m/s), camera | 1040..1044 | 0.11-0.24 m, mean 0.16 | 0.24-0.45 m/s | 0 |
+| Gusty, GPS only | 1040..1044 | 0.03-0.96 m, mean 0.41 | 0.29-0.48 m/s | 0 |
+
+With the 25% persistent fakes, fewer than 1 in 10 fused detections is a fake (asserted). The rest are rejected
+by the gate, because the locked target's sigma is a few centimetres. The target error relative to the true pad,
+as seen from the heli, stays at 0.01-0.08 m through the descent in the traced runs. The remaining 0.1 m is the
+position hold in gusts. Camera model checks (`t10_camera_model`, 39 frames each): detected at 5 m and 25 m
+above the tag; not at 40 m (10 px), at 0.4 m (fills the image), 3.6 m to the side at 5 m (outside the field of
+view), at 40 deg tilt, or at 3 rad/s of rate (blur). The old `t5_real_land_runs` / `t7_ekf_land_autorotate`
+landings (from the 3 m hover) went from 0.22-0.64 m to 0.07-0.26 m from the centre (EKF) with the camera.
+
+The picture-in-picture is a second three.js camera at the same mount, rendered into a scissored viewport
+of the main renderer over a 120 x 90 px box (no extra render target). The detection box is drawn from
+Rust's last detection (orange; green and "LOCK" when the target estimator is tracking, "LOCK · LANDING"
+when LAND flies it). It shows in REAL mode during LAND, the autorotation flare and cushion, within 12 m
+and 15 m height of the pad, or always when the CAMERA VIEW setting is ALWAYS.
+
 ## Flying assists (`assist`)
 
 Manual flight on a phone lost height slowly (thrust tilted in translation and turns, the ETL band, direct
@@ -470,9 +578,45 @@ Key T stays takeoff, so the tail gyro is on V. `cargo test --release --test suit
 | Tail HOLD / RATE, hover in 4.5 m/s crosswind, 15 s | HOLD within 1.7 deg; RATE weathervanes 64 deg toward the wind; RATE set + autopilot hover: within 1.0 deg |
 | Throttle curve | monotonic, f(0) = 0, f(1) = 1, f(hover) = hover, slope 0.50 at hover, 1.14-1.39 outside, normal and 3D |
 
+## Page layout
+
+The old page put 18 buttons in 9 rows, a cue and a toast saying the same thing, sticky tooltips, key-letter
+hints and six readouts over about two thirds of a phone screen. The new layout keeps the design language
+(the same colour tokens, Barlow Condensed and IBM Plex Mono) and puts the field first.
+
+| | |
+|---|---|
+| Action bar | ARM, THR HOLD, TAKEOFF, CIRCUIT, LAND, AUTOROT, STUNTS and the settings gear, icon + short label, the active mode lit (autopilot modes blue, ARMED red, THR HOLD orange). One row on desktop and phones (icons with tiny labels, 42 px tall); a slim 52 px column on the left in phone landscape so the field gets the width; the stunt picker opens under it |
+| Settings (gear) | slides in as a 320 px side panel on desktop, up from the bottom on phones; closes on an outside tap, the close button or Esc. Groups: FLYING (gyro, pitch curve, crash protection, wind), ASSISTS (alt hold, auto-yaw, tail gyro), SENSORS (sensors, estimator), VIEW (view: pilot / chase / pad close-up, camera view: auto / always), SESSION (landings and best, flight time, rescues, stunts, last stunt result, reset, help). Rows show their value; green when an assist is on, red only for crash protection off |
+| Status line | the existing cue, the one place for "what is happening" |
+| Toasts | events only (landed, crashed, crash protection, recovered, battery failsafe, stunt result, GPS reset, refused commands), decided in Rust (`Toast::ev`); shown for 3 s in a strip just above the sticks, never over the centre of the view. Mode-change and setting toasts are dropped: the status line, the lit button or the settings row already says it |
+| Readouts | ALT, V/S, SPEED, BATTERY. HEADSPEED appears only outside 90..105%, in throttle hold or in an autorotation. THROTTLE is gone (the left stick shows it). In REAL mode one blue EST badge at the end replaces the four "(EST)" labels |
+| Estimator pill | REAL only: one pill under the status line, `EKF OK`, `GPS REJECTED`, `GPS LOST`, `GPS RESET`, `BARO ONLY`, `CAMERA TRACKING`, ... with a coloured dot; tap it for the full sensor panel |
+| Assist pills | small pills between the sticks for what is on: ALT HOLD, AUTO-YAW, TAIL RATE, 3D PITCH, REAL SENSORS |
+| Camera view | the 120 x 90 px picture-in-picture above the right stick (below) |
+| Touch | no tooltips and no key-letter hints when the device has no hover and a coarse pointer; desktop keeps both. Keyboard shortcuts are unchanged; Esc also closes the settings |
+
+UI chrome coverage, `web/test/browser.mjs`: the union of the bounding boxes of every painted UI element (own
+background, border, text or icon), excluding the 3D canvas, sampled on a 2 px grid, 3.6 s after each step so
+toasts have faded. Touch emulation for the phones. Before = the previous build of the page.
+
+| Viewport | state | before | after |
+|---|---|---|---|
+| Phone portrait 390 x 844 | idle on the pad | 53.2% | 24.7% |
+| | hover hold | 53.8% | 26.6% |
+| | hover hold, REAL sensors | 63.6% | 33.1% |
+| Phone landscape 844 x 390 | idle | 58.7% | 22.0% |
+| | hover hold | 61.3% | 22.6% |
+| | hover hold, REAL sensors | 67.7% | 28.4% |
+| Desktop 960 x 600 | idle | 34.4% | 17.9% |
+| | hover hold | 38.3% | 18.5% |
+| | hover hold, REAL sensors | 41.8% | 21.9% |
+
+Most of what is left is the two 150 px sticks (about 14% of a portrait phone on their own).
+
 ## Tests: Rust vs JS
 
-`cargo test --release -- --nocapture --test-threads=1` in `rust/` (40 suites: the 26 below plus 7 `t8_*` stunt suites (including the full matrices) and 7 `t9_*` assist suites; plus `tests/step.rs`, about 10 s; the 7 `t7_ekf_*`
+`cargo test --release -- --nocapture --test-threads=1` in `rust/` (44 suites: the 26 below plus 7 `t8_*` stunt suites (including the full matrices), 7 `t9_*` assist suites and 4 `t10_*` landing transit / camera suites; plus `tests/step.rs`, about 10 s; the 7 `t7_ekf_*`
 suites are the EKF vs BASIC table above) against the JS harnesses `node test*.js rc-heli-field.html` on the original page. The JS uses Math.random, the Rust
 a seeded RNG, so noisy numbers agree within noise rather than to the digit. The REAL rows now run on
 the EKF (the default); the BASIC column of the table above is the original estimator.
@@ -481,7 +625,7 @@ the EKF (the default); the BASIC column of the table above is the original estim
 |---|---|---|
 | Takeoff -> hold | 3.0 m, vs -0.0 | 3.00 m, vs -0.00 |
 | Circuit, 6 laps | 14.9, 14.2, 14.2, 14.2, 14.2, 14.2 s; 4.44-5.02 m/s; alt 5.00-5.00 m; bat 73%; 6 lap toasts | 14.9, 14.1, 14.1, 14.1, 14.2, 14.2 s; 4.44-5.01 m/s; alt 5.00-5.00 m; bat 73%; 6 lap toasts |
-| Land after circuit | Butter-soft on Pad A, 0.35 m/s | Butter-soft on Pad A, 0.35 m/s |
+| Land after circuit | Butter-soft on Pad A, 0.35 m/s | Butter-soft on the pad, 0.35 m/s |
 | 15% failsafe in circuit | after 200 s, 13 laps, true 14.5%; lands 0.35 m/s | after 200 s, 13 laps, true 14.5%; lands 0.35 m/s |
 | Ground, breeze: disarmed / idle / 30% | x 0 z 0 each, hdg 0.0 / 0.0 / 0.7 | x 0 z 0 each, hdg 0.0 / 0.0 / 0.7 |
 | Ground, breeze: 40% (light on skids) | x -0.905 z 0.043 | x -0.902 z 0.043 |
@@ -503,19 +647,19 @@ the EKF (the default); the BASIC column of the table above is the original estim
 | Protect REAL (1) / (2) / (3) | +0.30 s, hold +1.49 / +3.18 s, min 11.98 m / +0.30 s | +0.29 s, hold +1.47 / +3.15 s, min 12.93 m / +0.29 s |
 | Protect REAL (4a/4b/4c/5) | 0.37 / 0.14 m/s / trigger 8.03 m / CRASHED | 0.37 / 0.00 m/s / trigger 8.10 m / CRASHED |
 | Battery IDEAL: 15% / stick touch | true 14.5% est 14.5% / off | true 14.5% est 14.5% / off |
-| Battery IDEAL: 8% forced | true 7.5%, 20/20 inputs ignored, touchdown 1.04 m/s (1.04-1.97, median about 1.55, over 24 runs) | true 7.5%, 20/20 ignored, touchdown 1.73 m/s (0.93-2.50, median about 2.0, over 22 seeds) |
-| Battery REAL: 15% / 8% forced | true 15.7% est 14.5% / true 8.2% est 7.5%, 20/20, 0.36 m/s | true 15.6% est 14.4% / true 8.2% est 7.4%, 20/20, 0.29 m/s |
+| Battery IDEAL: 8% forced | true 7.5%, 20/20 inputs ignored, touchdown 1.04 m/s (1.04-1.97, median about 1.55, over 24 runs) | true 7.5%, 20/20 ignored, touchdown 0.35 m/s on all 8 seeds 300..307 (was 0.93-2.50, median about 2.0, over 22 seeds: the faster transit gets it down before the pack is flat) |
+| Battery REAL: 15% / 8% forced | true 15.7% est 14.5% / true 8.2% est 7.5%, 20/20, 0.36 m/s | true 15.6% est 14.4% / true 8.3% est 7.4%, 20/20, 0.37 m/s |
 | REAL hover 30 s | pos std 0.18 / 0.15 m; max 0.65 m from anchor; alt 2.91-3.08; est err pos 0.26 (max 0.63) m, alt -0.00, tilt 0.58 (1.45), hdg 1.42 (1.82) deg; rpm tlm 0.97-1.02 | pos std 0.15 / 0.20 m; max 0.89 m; alt 2.97-3.07; est err pos 0.30 (max 0.82) m, alt 0.00, tilt 0.33 (0.86), hdg 0.14 (0.45) deg; rpm tlm 0.97-1.02 |
 | REAL circuit 3 laps | 14.3, 13.8, 14.1 s; pos err 0.50 (1.07) m; corner tilt err 4.45 (6.91) deg; 3.62-4.93 m/s; alt 4.55-5.08 | 14.7, 14.2, 14.3 s; pos err 0.86 (1.23) m; corner tilt err 0.34 (0.81) deg; 4.39-5.14 m/s; alt 4.75-5.20 |
-| REAL land x5 | 0.29-0.41 m/s, 0.31-0.69 m from centre | 0.30-0.37 m/s, 0.24-0.70 m from centre |
+| REAL land x5 | 0.29-0.41 m/s, 0.31-0.69 m from centre | 0.27-0.42 m/s, 0.12-0.54 m from centre (camera; GPS only 0.24-0.70 m) |
 | REAL GPS glitch 3.5 m / 2.5 s | moved 2.91 m, back to 0.24 m, hold | moved 0.58 m, back to 0.29 m, hold |
 | REAL battery telemetry at 20% | est 18.2%, dips to 14.7%, recovers 15.7%, no failsafe, 41.4 V; hover failsafe true 15.7% est 14.5% | est 18.3%, dips to 14.6%, recovers 15.8%, no failsafe, 41.4 V; hover failsafe true 15.6% est 14.6% |
 | AUTOROTATE IDEAL x5 | cut 25.0 m; sink 7.07-7.08, fwd 5.34-5.35 m/s; rpm 0.61-1.00; touchdown 0.44-0.45 m/s; 0.92-1.09 m from pad; 0 rescues, 0 crashes | cut 25.0 m; sink 7.08-7.10, fwd 5.35-5.39 m/s; rpm 0.61-1.00; touchdown 0.44-0.46 m/s; 1.02-1.11 m from pad; 0 rescues, 0 crashes |
-| AUTOROTATE REAL x5 | cut 24.9-25.0 m; sink 6.89-6.98 m/s; rpm 0.72-1.01; touchdown 0.61-0.80 m/s; 1.82-3.06 m from pad; 0 rescues, 0 crashes | cut 25.0 m; sink 6.84-7.03 m/s; rpm 0.71-1.01; touchdown 0.55-0.62 m/s; 1.15-2.05 m from pad; 0 rescues, 0 crashes |
+| AUTOROTATE REAL x5 | cut 24.9-25.0 m; sink 6.89-6.98 m/s; rpm 0.72-1.01; touchdown 0.61-0.80 m/s; 1.82-3.06 m from pad; 0 rescues, 0 crashes | now cut 24.9-25.0 m, touchdown 0.58-0.64 m/s, 0.80-1.46 m from pad (camera in the flare and cushion), 0 rescues; was cut 25.0 m; sink 6.84-7.03 m/s; rpm 0.71-1.01; touchdown 0.55-0.62 m/s; 1.15-2.05 m from pad; 0 rescues, 0 crashes |
 
 Notes on differences, all within run-to-run noise of the JS version:
 
-- The IDEAL 8% forced landing is noisy in both versions. In this scripted test the pack goes completely
+- (Before the LAND transit change.) The IDEAL 8% forced landing is noisy in both versions. In this scripted test the pack goes completely
   flat about 31 s after the 8% trigger, partway down the descent, and the heli drops the rest of the way
   on a coasting rotor. The touchdown speed depends on the height where that happens. In Rust the trigger
   catches the heli about 0.2 m higher on average, so the median touchdown is about 2.0 m/s, against
@@ -542,19 +686,28 @@ wasm frame JSON (mode code, toasts drained after each frame).
   through `engine.ts` exactly as the page does (atob, Blob stream, DecompressionStream gzip,
   WebAssembly.instantiate), flies takeoff -> 2 circuit laps -> land -> REAL sensors -> EKF panel and ESTIMATOR toggle through the exports,
   then runs the page's bundle in a vm with a DOM / THREE stub, pumps requestAnimationFrame and exercises
-  a Pirouette through the exports, buttons, keys (K, M, E, C, J / Esc, G, R) and a stick takeover with no runtime errors.
-- `PW_DIR=<dir with puppeteer-core and @sparticuz/chromium> node web/test/browser.mjs rc-heli-field.html`: headless Chromium (puppeteer-core with
-  @sparticuz/chromium from npm, software WebGL). Answers the cdnjs three.js request with the identical
-  three@0.128.0 build from npm because cdnjs is not reachable from the build machine. It clicks TAKEOFF,
-  presses K, M, E (and the ESTIMATOR button) and G and checks hover hold, circuit, the sensor panel
-  with the EKF status and test ratio bars, and a Butter-soft landing on Pad A. It opens ★ STUNTS, checks the five picker entries, flies a Pirouette from the picker to recovery
-  (cue, result panel, pitch curve restored), then flies manually (Space, W), turns on ALT HOLD (Q) and AUTO-YAW (button), lifts off into ALT HOLD
-  and checks the climb bar beside the left stick (filled above zero, target mark), and checks a 390 px phone viewport with the picker open: no horizontal scroll,
-  sticks, climb bar (clear of the stick labels) and all buttons in view, 3-column readouts. The smoke test also toggles Q / Y / V and the three buttons. There are no page errors.
+  a Pirouette through the exports, buttons, keys (K, M, E, C, J / Esc, Q / Y / V, G, R), the estimator pill and sensor panel,
+  the camera view setting, the settings sheet (open, Esc) and a stick takeover with no runtime errors.
+- `PW_DIR=<dir with puppeteer-core and @sparticuz/chromium> node web/test/browser.mjs rc-heli-field.html [shots] [before.html]`:
+  headless Chromium (puppeteer-core with @sparticuz/chromium from npm, software WebGL; touch emulation for the
+  phone viewports). Answers the cdnjs three.js request with the identical three@0.128.0 build from npm because
+  cdnjs is not reachable from the build machine. It measures the UI coverage table above (and the before page's,
+  when given, failing if the new one isn't lower), then on desktop: action bar order and lit mode, the four core
+  readouts, tooltips and key hints, no toast for a mode change, REAL mode with the EST badge and the health pill
+  expanding / collapsing the sensor panel (camera status), the settings side panel (every setting toggles and
+  back, pitch refused in the air, outside click, Esc, HELP), a REAL LAND with the 120 x 90 picture-in-picture,
+  its detection box and lock, clear of the sticks and the status line, the landing toast low on the screen
+  and fading, the stunt picker and a Pirouette (result toast and session stats), and ALT HOLD / AUTO-YAW with
+  their pills and the climb bar. On a 390 x 844 touch phone: no tooltips or key hints, no horizontal scroll, one row
+  of eight 42 px action buttons, sticks in the bottom corners, the climb bar, the picker, the bottom sheet and
+  its outside tap. On 844 x 390: the action bar as a column, sticks in the corners. There are no page errors.
+  Screenshots: `desktop.png`, `settings-open.png`, `real-landing-pip.png`, `phone-portrait.png`,
+  `phone-picker.png`, `phone-settings-open.png`, `phone-landscape.png` and `before-*.png`. `QUICK=1` skips the coverage pass.
 
-The sim costs about 6..10 microseconds per 240 Hz step in wasm (Node) in REAL mode with both estimators
+The sim costs about 6..12 microseconds per 240 Hz step in wasm (Node) in REAL mode with both estimators and
+the camera
 running (3.4 before the EKF; the 18-state filter with drag fusion is about 1 microsecond more than the 16-state one,
-within the run-to-run spread on the build machine), and building a frame with the sensor panel takes about 30 microseconds.
+within the run-to-run spread on the build machine; the camera and target estimator add no measurable cost), and building a frame with the sensor panel takes about 40 microseconds (2.2 KB of JSON).
 
 ## Build and run
 
@@ -576,7 +729,7 @@ submodule (rust-lang/backtrace-rs at 28ec93b5), and copied to
 missing. The `wasm` profile is opt-level z, LTO, one codegen unit, panic abort, stripped. The crate
 has no dependencies.
 
-Sizes: wasm 136 KB raw, 85 KB gzip+base64 embedded; bundle 17 KB; page 120,394 bytes (118 KiB).
+Sizes: wasm 148 KB raw, 91 KB gzip+base64 embedded; bundle 19 KB; page 142,672 bytes (139 KiB). Before this change: wasm 136 KB, bundle 17 KB, page 120,394 bytes.
 
 ## Licence
 
@@ -584,9 +737,9 @@ Copyright (C) 2026 Conrad Micallef
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General
 Public License as published by the Free Software Foundation, either version 3 of the License, or (at your
-option) any later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
-without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE)
-for the full text.
+option) any later version. This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details. You should have received a copy of the GNU General Public
+License along with this program; see [LICENSE](LICENSE). If not, see <https://www.gnu.org/licenses/>.
 
-The page loads [three.js](https://threejs.org/) (MIT licence) from cdnjs at run time; it is not part of this
-repository.
+three.js (MIT licence) is loaded from cdnjs at run time and is not part of this repository.

@@ -3,7 +3,7 @@
 //! the HUD/cue text, so the page only renders what this module decides.
 
 use crate::autopilot::{Auto, Mode, Phase};
-use crate::heli::{Heli, PADS, PAD_R};
+use crate::heli::{pad_dist, Heli, PAD_R};
 use crate::jsonw::{round_str, to_fixed};
 use crate::math::*;
 use crate::rng::Rng;
@@ -32,6 +32,8 @@ pub struct Settings {
     pub tail_rate: bool,
     /// finer throttle / collective curve around the hover point (direct manual collective only)
     pub thr_curve: bool,
+    /// downward camera picture-in-picture: false = automatic (REAL, landing or low near the pad), true = always in REAL
+    pub pip: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -59,6 +61,25 @@ pub struct Toast {
     pub title: String,
     pub sub: String,
     pub kind: &'static str,
+    /// an event the page shows as a toast (landed, crashed, rescued, failsafe, stunt result, GPS
+    /// reset, refused commands); the others only repeat what the status line or settings show
+    pub ev: bool,
+}
+
+/// Which toasts are events the page shows (the rest repeat the status line, a button state or
+/// the settings sheet): landed, crashed, rescued, failsafe, stunt result, GPS reset, and the
+/// feedback when a command is refused.
+pub fn is_event(title: &str) -> bool {
+    const EV: [&str; 15] = [
+        "Crashed", "Crash protection", "Recovered", "Battery low", "Battery critical", "Forced landing", "GPS reset",
+        "Throttle not low", "Battery flat", "Battery too low", "Already on the ground", "Stunt in progress", "Land first",
+        "Controller connected", "Settling with power",
+    ];
+    EV.iter().any(|e| title.starts_with(e))
+        || title.contains(" landing on")
+        || title.contains(" landing off")
+        || title.ends_with("autorotation landing")
+        || title.contains(": score ")
 }
 
 /// One frame of pilot input, gathered by the page (or a test harness).
@@ -112,6 +133,8 @@ pub enum Command {
     AutoYaw = 23,
     /// toggle the tail gyro HOLD / RATE
     TailRate = 24,
+    /// toggle the downward camera picture-in-picture between automatic and always (REAL)
+    CamView = 25,
 }
 
 impl Command {
@@ -143,6 +166,7 @@ impl Command {
             22 => AltHold,
             23 => AutoYaw,
             24 => TailRate,
+            25 => CamView,
             _ => return None,
         })
     }
@@ -152,7 +176,7 @@ impl Command {
 pub struct LastTouch {
     pub vs: f64,
     pub grade: &'static str,
-    pub pad: Option<usize>,
+    pub on_pad: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -188,7 +212,8 @@ pub struct Sim {
     pub rescues: u32,
     pub landings: u32,
     pub best: Option<f64>,
-    pub goal_b: bool,
+    /// beginner goal done: a manual lap out and back, landed on the pad under 1 m/s
+    pub goal_done: bool,
     pub gp_seen: bool,
     pub rng: Rng,
     /// toasts raised since the page last read a frame
@@ -222,7 +247,7 @@ impl Sim {
             est: Est::new(),
             sens: Sensors::new(),
             set: Settings { level: true, pitch3d: false, wind: 1, cam: 0, protect: true, real: false, ekf: true,
-                alt_hold: false, auto_yaw: false, tail_rate: false, thr_curve: true },
+                alt_hold: false, auto_yaw: false, tail_rate: false, thr_curve: true, pip: false },
             sticks: Sticks::default(),
             auto: None,
             auto_out: None,
@@ -230,7 +255,7 @@ impl Sim {
             rescues: 0,
             landings: 0,
             best: None,
-            goal_b: false,
+            goal_done: false,
             gp_seen: false,
             rng: Rng::new(seed),
             toasts: Vec::new(),
@@ -248,6 +273,7 @@ impl Sim {
             ay_f: 0.0,
             vy_prev: 0.0,
         };
+        s.sens.cam.rng = Rng::new(seed ^ 0x5eed_ca3e);
         s.reset_heli();
         s
     }
@@ -262,7 +288,9 @@ impl Sim {
     }
 
     pub fn toast(&mut self, title: impl Into<String>, sub: impl Into<String>, kind: &'static str) {
-        let t = Toast { title: title.into(), sub: sub.into(), kind };
+        let title: String = title.into();
+        let ev = is_event(&title);
+        let t = Toast { title, sub: sub.into(), kind, ev };
         self.toasts.push(t.clone());
         self.last_toast = Some(t);
         self.toast_count += 1;
@@ -350,7 +378,7 @@ impl Sim {
                 }
                 self.picker = false;
                 self.reset_heli();
-                self.goal_b = false;
+                self.goal_done = false;
                 self.toast_clear = true;
             }
             Takeoff => self.start_auto(Mode::Takeoff, false, false, false, false),
@@ -361,6 +389,7 @@ impl Sim {
                 self.picker = false;
                 self.cancel_auto(true)
             }
+            CamView => self.set.pip = !self.set.pip,
             Stunts => self.picker = !self.picker,
             PickerClose => self.picker = false,
             AltHold => {
@@ -414,7 +443,7 @@ impl Sim {
 
     fn toggle_arm(&mut self) {
         if self.h.crashed {
-            self.toast("Crashed", "Tap RESET to put a fresh heli on Pad A", "bad");
+            self.toast("Crashed", "Tap RESET to put a fresh heli on the pad", "bad");
             return;
         }
         if self.h.armed {
@@ -492,38 +521,22 @@ impl Sim {
     // ---------- landing record ----------
     pub fn landed(&mut self, vs: f64) {
         self.landings += 1;
-        let mut pad = None;
-        for (i, p) in PADS.iter().enumerate() {
-            if (self.h.p.x - p.x).hypot(self.h.p.z - p.z) <= PAD_R {
-                pad = Some(i);
-            }
-        }
+        let d = pad_dist(self.h.p.x, self.h.p.z);
+        let on_pad = d <= PAD_R;
         let grade = grade_of(vs);
-        if pad.is_some() && self.best.map_or(true, |b| vs < b) {
+        if on_pad && self.best.map_or(true, |b| vs < b) {
             self.best = Some(vs);
         }
-        let wher = match pad {
-            Some(i) => format!("on Pad {}", PADS[i].name),
-            None => format!("off the pads ({})", self.nearest_text()),
-        };
-        self.h.last_touch = Some(LastTouch { vs, grade, pad });
-        let good = pad.is_some() && vs < 1.0;
-        self.toast(format!("{grade} landing {wher}"), format!("Touchdown {} m/s", to_fixed(vs, 2)), if good { "good" } else { "" });
-        if pad == Some(1) && vs < 1.0 {
-            self.goal_b = true;
+        let wher = if on_pad { "on the pad".to_string() } else { format!("off the pad ({} m out)", to_fixed(d - PAD_R, 1)) };
+        self.h.last_touch = Some(LastTouch { vs, grade, on_pad });
+        let good = on_pad && vs < 1.0;
+        // the beginner goal: a manual flight that went out at least 8 m and came back softly
+        let goal = good && self.auto.is_none() && self.h.max_out >= 8.0;
+        let sub = if goal { format!("Touchdown {} m/s. Goal done.", to_fixed(vs, 2)) } else { format!("Touchdown {} m/s", to_fixed(vs, 2)) };
+        self.toast(format!("{grade} landing {wher}"), sub, if good { "good" } else { "" });
+        if goal {
+            self.goal_done = true;
         }
-    }
-
-    fn nearest_text(&self) -> String {
-        let (mut d, mut n) = (f64::INFINITY, "");
-        for p in PADS.iter() {
-            let dd = (self.h.p.x - p.x).hypot(self.h.p.z - p.z);
-            if dd < d {
-                d = dd;
-                n = p.name;
-            }
-        }
-        format!("{} m from Pad {}", to_fixed(d - PAD_R, 1), n)
     }
 
     // ---------- HUD ----------
@@ -601,6 +614,62 @@ impl Sim {
             resc: self.rescues.to_string(),
             cue: self.cue(),
             sens: if self.set.real { self.sens_html() } else { String::new() },
+            rpm_show: self.rpm_show(),
+            health: if self.set.real { self.health() } else { ("", "") },
+        }
+    }
+
+    /// HEADSPEED readout only when it matters: outside 90..105%, in throttle hold or an autorotation.
+    fn rpm_show(&self) -> bool {
+        let r = self.est.rpm;
+        self.h.armed && (r < 0.9 || r > 1.05 || self.h.hold || self.auto.as_ref().is_some_and(|a| a.ar_unpowered()))
+    }
+
+    /// One-line estimator health for the collapsed sensor pill: (text, class).
+    pub fn health(&self) -> (&'static str, &'static str) {
+        use crate::ekf::Status;
+        let st = &self.sens.st;
+        if st.gps_lost {
+            return ("GPS LOST", "bad");
+        }
+        if self.set.ekf {
+            match self.sens.ekf.status() {
+                Status::GpsReset => return ("GPS RESET", "bad"),
+                Status::GpsRejected => return ("GPS REJECTED", "warn"),
+                Status::BaroOnly => return ("BARO ONLY", "warn"),
+                Status::Init => return ("EKF INIT", "warn"),
+                _ => {}
+            }
+        } else if st.glitch {
+            return ("GPS GLITCH", "bad");
+        }
+        if self.sens.cam.enabled && self.sens.pl.tracking() {
+            return ("CAMERA TRACKING", "ok");
+        }
+        if st.gps_reacq {
+            return ("GPS REACQUIRING", "warn");
+        }
+        if self.set.ekf {
+            ("EKF OK", "ok")
+        } else {
+            ("BASIC OK", "")
+        }
+    }
+
+    /// Show the downward camera picture-in-picture (REAL only): LAND, an autorotation's final
+    /// phases, low over the pad, or always when the user turned it on.
+    pub fn pip_show(&self) -> bool {
+        if !self.set.real || self.h.crashed {
+            return false;
+        }
+        if self.set.pip {
+            return true;
+        }
+        let near = crate::heli::pad_dist(self.h.p.x, self.h.p.z) < 12.0 && self.h.alt() < 15.0 && !self.h.grounded;
+        match self.auto.as_ref().map(|a| (a.mode, a.phase)) {
+            Some((Mode::Land, _)) => true,
+            Some((Mode::Autorot, Phase::Flare | Phase::Cushion)) => true,
+            _ => near,
         }
     }
 
@@ -626,6 +695,15 @@ impl Sim {
             format!("<span>GPS <b>{} sats</b></span>", st.sats)
         };
         s += &format!("<span>RANGE <b>{}</b></span>", if st.rf { "yes" } else { "no" });
+        let pl = &self.sens.pl;
+        let cst = pl.status(self.sens.cam.enabled);
+        let ccls = match cst {
+            "TRACKING" => "",
+            "LOST" => " class=\"warn\"",
+            "OFF" => " class=\"bad\"",
+            _ => "",
+        };
+        s += &format!("<span>CAMERA <b{ccls}>{cst}</b> · {} det</span>", self.sens.cam.n_det);
         if st.vib > 1.25 {
             s += &format!("<span class=\"warn\">VIB {}x</span>", to_fixed(st.vib, 1));
         }
@@ -683,11 +761,10 @@ impl Sim {
         let est = &self.est;
         let pct = |x: f64| round_str(x * 100.0);
         if h.crashed {
-            return "Crashed. Tap <em>RESET</em> to put a fresh heli on Pad A.".into();
+            return "Crashed. Tap <em>RESET</em> to put a fresh heli on the pad.".into();
         }
         if let Some(a) = &self.auto {
             let take = " Touch any stick to take control.";
-            let padn = a.pad.map(|i| PADS[i].name).unwrap_or("A");
             if a.mode == Mode::Rescue {
                 return "Crash protection <em>recovering</em>. Hands off for a moment.".into();
             }
@@ -695,10 +772,10 @@ impl Sim {
                 return self.stunt_cue(st);
             }
             if a.mode == Mode::Land && a.forced {
-                return format!("Battery critical: <em>forced landing</em> on Pad {padn}.");
+                return "Battery critical: <em>forced landing</em> on the pad.".into();
             }
             if a.mode == Mode::Land && a.fs {
-                return format!("Battery low: autopilot <em>landing</em> on Pad {padn}. Touch a stick to take over.");
+                return "Battery low: autopilot <em>landing</em> on the pad. Touch a stick to take over.".into();
             }
             if est.rpm < 0.97 && h.grounded {
                 return format!("Autopilot: spooling up, <em>{}%</em> headspeed.", pct(est.rpm));
@@ -718,8 +795,8 @@ impl Sim {
                 }
                 Mode::Land => {
                     return format!(
-                        "{} Pad {padn}.{take}",
-                        if a.descending { "Autopilot: <em>descending</em> onto" } else { "Autopilot: lining up over" }
+                        "{}{take}",
+                        self.land_cue(a)
                     )
                 }
                 Mode::Autorot => {
@@ -783,17 +860,20 @@ impl Sim {
                 format!("ALT HOLD: {} at <em>{} m/s</em>. Centre the left stick to hold.", if self.ah.vz_stick > 0.0 { "climbing" } else { "descending" }, to_fixed(self.ah.vz_stick.abs(), 1))
             };
         }
-        if self.goal_b {
+        if self.goal_done {
             return if self.set.level {
-                "Pad B done. Next, try <em>GYRO: RATE</em> for real flybarless handling.".into()
+                "Lap and landing done. Next, try <em>GYRO: RATE</em> for real flybarless handling.".into()
             } else {
-                "Rate mode landing done. Try a <em>nose-in</em> hover next.".into()
+                "Rate mode lap done. Try a <em>nose-in</em> hover next.".into()
             };
         }
         if h.grounded {
-            return "On the ground. Lift off and fly over to <em style=\"color:var(--cool)\">Pad B</em>.".into();
+            return "On the ground. Take off, hover, fly a <em>lap</em> around the field and land back on the pad under 1 m/s.".into();
         }
-        "Hover tail-in, then move over to <em style=\"color:var(--cool)\">Pad B</em> and land under 1 m/s.".into()
+        if h.max_out >= 8.0 {
+            return "Now come back and <em>land on the pad</em> under 1 m/s.".into();
+        }
+        "Hover tail-in, then fly a <em>lap</em> around the field and land back on the pad under 1 m/s.".into()
     }
 }
 
@@ -824,4 +904,8 @@ pub struct Hud {
     pub resc: String,
     pub cue: String,
     pub sens: String,
+    /// show the HEADSPEED readout
+    pub rpm_show: bool,
+    /// collapsed sensor pill: estimator health text and class
+    pub health: (&'static str, &'static str),
 }

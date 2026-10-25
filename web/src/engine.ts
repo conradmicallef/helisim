@@ -1,10 +1,13 @@
 // Loads the helisim wasm core from the base64 + gzip string the build embeds in the page,
 // and wraps its C-ABI exports. Only plain numbers cross the boundary; state comes back as JSON.
 
-export interface Toast { t: string; s: string; k: string }
+/** a toast; `ev` = an event the page shows (the rest repeat the status line or settings) */
+export interface Toast { t: string; s: string; k: string; ev: boolean }
 export interface Hud {
   thr: string; rpm: string; rpmC: string; alt: string; vs: string; vsC: string; spd: string;
   bat: string; batC: string; land: string; time: string; resc: string; cue: string; sens: string;
+  /** show the HEADSPEED readout; collapsed estimator-health pill text and class (REAL) */
+  rpmShow: boolean; health: string; healthC: string;
 }
 export interface StuntItem { id: number; n: string; d: string; key: string; best: number }
 export interface StuntRes { n: string; score: number; lost: string; dev: string; hdg: string; rec: string; minAlt: string }
@@ -29,6 +32,9 @@ export interface Frame {
   /** stunt picker open, stunt list, live stunt (kind / phase, -1 none), last result */
   picker: boolean; stunts: StuntItem[]; stuntK: number; stuntPh: number; stuntBlocked: boolean; stuntN: number;
   sres?: StuntRes;
+  /** downward camera PiP: show it, user setting (always), camera status, detections, tag locked,
+   *  autopilot flying the camera target, last detection [u, v, span px, yaw rad] of a 640 x 480 image (empty if none recent) */
+  pip: boolean; pipSet: boolean; camSt: string; camN: number; camLock: boolean; camTgt: boolean; camDet: number[];
   toastClear: boolean; toasts: Toast[];
 }
 
@@ -36,7 +42,7 @@ export interface Frame {
 export const Cmd = {
   Arm: 0, Hold: 1, Protect: 2, Sensors: 3, Level: 4, Pitch: 5, Wind: 6, Cam: 7, Reset: 8,
   Takeoff: 9, Circuit: 10, Land: 11, Autorot: 12, Takeover: 13, Estimator: 14,
-  Stunts: 15, StuntFirst: 16, PickerClose: 21, AltHold: 22, AutoYaw: 23, TailRate: 24,
+  Stunts: 15, StuntFirst: 16, PickerClose: 21, AltHold: 22, AutoYaw: 23, TailRate: 24, CamView: 25,
 } as const;
 
 interface Exports {

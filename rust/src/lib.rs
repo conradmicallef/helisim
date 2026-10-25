@@ -9,7 +9,9 @@
 //! - `fbl`: flybarless gyro, self-level, heading-hold tail
 //! - `sensors` + `estimator` + `ekf`: simulated sensors on their own clocks, complementary filter
 //!   (BASIC) and error-state extended Kalman filter (EKF)
-//! - `autopilot`: takeoff, hold, circuit, land, rescue, autorotation, battery failsafe
+//! - `precland`: downward camera (pad tag detection) and the precision-landing target estimator
+//! - `autopilot`: takeoff, hold, circuit, land (fast transit, camera precision landing), rescue,
+//!   autorotation, battery failsafe
 //! - `assist`: throttle curve, ALT HOLD, AUTO-YAW, tail RATE, ground-proximity predictor
 //! - `stunt`: STUNTS (pirouette, loop, roll, flip, inverted hover) and their scoring
 //! - `sim`: world step, commands, landing grading, toasts, HUD and cue text
@@ -23,6 +25,7 @@ pub mod fbl;
 pub mod heli;
 pub mod jsonw;
 pub mod math;
+pub mod precland;
 pub mod rng;
 pub mod sensors;
 pub mod sim;

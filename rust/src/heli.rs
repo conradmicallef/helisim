@@ -19,23 +19,20 @@ pub const PAD_R: f64 = 1.0;
 pub const REST_Y: f64 = 0.29;
 
 pub struct Pad {
-    pub name: &'static str,
     pub x: f64,
     pub z: f64,
+    /// heading of the camera tag's top edge (world, rad; 0 = away from the pilot)
+    pub hdg: f64,
 }
-pub const PADS: [Pad; 2] = [Pad { name: "A", x: 0.0, z: 0.0 }, Pad { name: "B", x: 6.0, z: -6.0 }];
+/// The single landing pad at the origin, in front of the pilot station.
+pub const PAD: Pad = Pad { x: 0.0, z: 0.0, hdg: 0.0 };
+/// Side of the black square of the camera tag on the pad, m.
+pub const TAG_SIZE: f64 = 0.9;
 pub const SKIDS: [V3; 4] = [v3(0.14, -0.29, -0.24), v3(-0.14, -0.29, -0.24), v3(0.14, -0.29, 0.26), v3(-0.14, -0.29, 0.26)];
 
-pub fn nearest_pad(x: f64, z: f64) -> usize {
-    let (mut best, mut d) = (0, f64::INFINITY);
-    for (i, p) in PADS.iter().enumerate() {
-        let dd = (x - p.x).hypot(z - p.z);
-        if dd < d {
-            d = dd;
-            best = i;
-        }
-    }
-    best
+/// Horizontal distance of a point from the pad centre.
+pub fn pad_dist(x: f64, z: f64) -> f64 {
+    (x - PAD.x).hypot(z - PAD.z)
 }
 
 // ---------- rotor aerodynamics shared by physics and flight controller ----------
@@ -109,6 +106,8 @@ pub struct Heli {
     pub rotor: crate::fbl::Rotor,
     /// thrust per unit mass along the disc normal, in g (negative = pushing down the shaft)
     pub thrust_g: f64,
+    /// farthest from the pad in this flight (m), reset at liftoff
+    pub max_out: f64,
 }
 
 impl Heli {
@@ -151,6 +150,7 @@ impl Heli {
             fs_at: None,
             rotor: crate::fbl::Rotor::default(),
             thrust_g: 0.0,
+            max_out: 0.0,
         }
     }
     pub fn alt(&self) -> f64 {
@@ -352,7 +352,13 @@ impl Sim {
                 }
             }
         } else if contact > 0.004 {
+            if h.grounded {
+                h.max_out = 0.0;
+            }
             h.grounded = false;
+        }
+        if !h.grounded {
+            h.max_out = h.max_out.max(pad_dist(h.p.x, h.p.z));
         }
         if let Some(r) = crash_reason {
             self.crash(r);

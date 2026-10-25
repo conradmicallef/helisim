@@ -53,8 +53,8 @@ f = run(120, f => { collect(f); laps = toasts.filter(t => /^Lap \d+ complete/.te
 if (laps < 2 || f.mode !== 2) fail('circuit laps ' + laps);
 ok(`circuit: ${laps} laps, alt ${(f.p[1] - 0.29).toFixed(2)} m, HUD speed ${f.hud.spd}, battery ${f.hud.bat}`);
 e.cmd(Cmd.Land);
-f = run(60, f => { collect(f); return f.mode === -1 && toasts.some(t => /landing on Pad A/.test(t)); });
-const land = toasts.find(t => /landing on Pad A/.test(t));
+f = run(60, f => { collect(f); return f.mode === -1 && toasts.some(t => /landing on the pad/.test(t)); });
+const land = toasts.find(t => /landing on the pad/.test(t));
 if (!land || f.crashed) fail('landing ' + land + ' crashed ' + f.crashed);
 ok(`land: "${land}" | HUD landings ${f.hud.land} | flight time ${f.hud.time}`);
 e.cmd(Cmd.Sensors);
@@ -89,14 +89,14 @@ const require = createRequire(path.join(here, '../package.json'));
 const THREE = require('three');
 const H = {}, els = {}, errors = [];
 const proxy = () => new Proxy(function () {}, { get: () => proxy(), apply: () => proxy(), set: () => true });
-THREE.WebGLRenderer = function () { return { domElement: {}, setPixelRatio() {}, shadowMap: {}, capabilities: { getMaxAnisotropy: () => 1 }, setSize() {}, render() {} }; };
+THREE.WebGLRenderer = function () { return { domElement: {}, setPixelRatio() {}, shadowMap: {}, capabilities: { getMaxAnisotropy: () => 1 }, setSize() {}, render() {}, setScissorTest() {}, setScissor() {}, setViewport() {} }; };
 THREE.CanvasTexture = function () { return new THREE.Texture(); };
 function el(id) {
   if (els[id]) return els[id];
   const e = {
-    id, hidden: false, style: {}, className: '', textContent: '', innerHTML: '', clientWidth: 150, clientHeight: 150,
+    id, hidden: ['sheet', 'scrim', 'toast', 'pip', 'hp', 'sens', 'help', 'est', 'rRpm', 'picker', 'sres'].includes(id), style: {}, className: '', textContent: '', innerHTML: '', clientWidth: 150, clientHeight: 150,
     classList: { set: new Set(), add(c) { this.set.add(c); }, remove(c) { this.set.delete(c); }, toggle(c, on) { on ? this.set.add(c) : this.set.delete(c); } },
-    setAttribute() {}, setPointerCapture() {}, querySelector: () => ({ style: {} }), appendChild() {},
+    setAttribute() {}, setPointerCapture() {}, querySelector: () => ({ style: {} }), appendChild() {}, focus() {}, contains: () => false,
     addEventListener(ev, fn) { H[id + ev] = fn; }, getBoundingClientRect: () => ({ top: 0, left: 0, width: 150, height: 150 }), getContext: () => proxy(),
     set onclick(fn) { H[id + 'click'] = fn; },
   };
@@ -107,12 +107,12 @@ const winL = {}, rafs = [];
 let now = 0;
 const ctx = {
   THREE, console: { ...console, error: (...a) => { errors.push(a.join(' ')); } },
-  document: { getElementById: el, createElement: () => el('c' + Math.random()) },
-  navigator: {}, performance: { now: () => now }, requestAnimationFrame: fn => rafs.push(fn),
+  document: { getElementById: el, createElement: () => el('c' + Math.random()), querySelectorAll: () => [], activeElement: null },
+  navigator: {}, matchMedia: () => ({ matches: false }), performance: { now: () => now }, requestAnimationFrame: fn => rafs.push(fn),
   atob, Blob, Response, DecompressionStream, TextDecoder, WebAssembly, Math, JSON, Object, Array, Promise, Uint8Array,
   setTimeout, queueMicrotask,
 };
-ctx.window = { ...ctx, addEventListener(ev, fn) { winL[ev] = fn; }, devicePixelRatio: 1, HELI_WASM: b64 };
+ctx.window = { ...ctx, matchMedia: ctx.matchMedia, addEventListener(ev, fn) { winL[ev] = fn; }, devicePixelRatio: 1, HELI_WASM: b64 };
 ctx.globalThis = ctx.window;
 vm.createContext(ctx);
 try { vm.runInContext(bundle, ctx); } catch (err) { fail('bundle threw: ' + err.stack); }
@@ -121,39 +121,49 @@ if (!rafs.length) fail('bundle never started its frame loop: ' + errors.join(' |
 const pump = sec => { for (let i = 0; i < sec * 60; i++) { now += 1000 / 60; const fn = rafs.shift(); if (!fn) fail('raf chain broke'); try { fn(now); } catch (err) { fail('frame threw: ' + err.stack); } } };
 const key = k => { winL.keydown({ key: k, preventDefault() {}, repeat: false }); winL.keyup({ key: k }); };
 H.bGoclick();
+els.help.hidden = true;
 pump(1);
 if (!/ARM/.test(els.cue.innerHTML)) fail('cue before arming: ' + els.cue.innerHTML);
 H.aTakeclick();
 pump(12);
 if (!els.aTake.classList.set.has('on')) fail('TAKEOFF button not lit');
-if (els.bArm.firstChild.textContent !== 'ARMED') fail('arm label ' + els.bArm.firstChild.textContent);
+if (els.bArmL.textContent !== 'ARMED') fail('arm label ' + els.bArmL.textContent);
 ok(`DOM stub: takeoff via button, cue "${els.cue.innerHTML.replace(/<[^>]+>/g, '')}", ALT ${els.oAlt.textContent}, RPM ${els.oRpm.textContent}`);
 key('k'); pump(8);
 if (!els.aCirc.classList.set.has('on')) fail('circuit key K');
 key('m'); pump(1);
-if (els.sens.hidden || els.lAlt.textContent !== 'ALT (EST)') fail('sensors key M');
-if (els.bEst.firstChild.textContent !== 'ESTIMATOR: EKF') fail('estimator label ' + els.bEst.firstChild.textContent);
+if (els.hp.hidden || els.est.hidden || !/EKF OK|RANGEFINDER|EKF INIT|GPS/.test(els.hp.textContent) || !els.sens.hidden) fail('sensors key M: pill ' + els.hp.textContent);
+H.hpclick(); pump(0.2);
+if (els.sens.hidden || !/POS ERR/.test(els.sens.innerHTML) || !/CAMERA/.test(els.sens.innerHTML)) fail('health pill expands the sensor panel');
+if (els.bEstV.textContent !== 'EKF') fail('estimator label ' + els.bEstV.textContent);
 key('e'); pump(0.2);
-if (els.bEst.firstChild.textContent !== 'ESTIMATOR: BASIC' || !/EST <b>BASIC/.test(els.sens.innerHTML)) fail('estimator key E');
+if (els.bEstV.textContent !== 'BASIC' || !/EST <b>BASIC/.test(els.sens.innerHTML)) fail('estimator key E');
 H.bEstclick(); pump(0.2);
-if (els.bEst.firstChild.textContent !== 'ESTIMATOR: EKF' || !/EKF <b/.test(els.sens.innerHTML)) fail('estimator button');
+if (els.bEstV.textContent !== 'EKF' || !/EKF <b/.test(els.sens.innerHTML)) fail('estimator button');
 key('c'); pump(0.2);
-if (els.bCam.firstChild.textContent !== 'VIEW: CHASE') fail('camera key C: ' + els.bCam.firstChild.textContent);
+if (els.bCamV.textContent !== 'CHASE') fail('camera key C: ' + els.bCamV.textContent);
+H.bPipclick(); pump(0.2);
+if (els.bPipV.textContent !== 'ALWAYS' || els.pip.hidden) fail('camera view setting');
+H.bPipclick(); pump(0.2);
+H.bSetclick(); pump(0.1);
+if (els.sheet.hidden) fail('settings sheet opens');
+key('Escape'); pump(0.1);
+if (!els.sheet.hidden) fail('Esc closes the settings sheet');
 H.stRpointerdown({ pointerId: 1, clientX: 75, clientY: 75, preventDefault() {} }); H.stRpointerup({ pointerId: 1 });
 pump(0.5);
 if (els.aCirc.classList.set.has('on')) fail('stick touch did not cancel the circuit');
 key('q'); key('y'); key('v'); pump(0.3);
-if (els.bAlt.firstChild.textContent !== 'ALT HOLD: ON' || els.bYaw.firstChild.textContent !== 'AUTO-YAW: ON' || els.bTail.firstChild.textContent !== 'TAIL: RATE') fail('assist keys Q / Y / V');
+if (els.bAltV.textContent !== 'ON' || els.bYawV.textContent !== 'ON' || els.bTailV.textContent !== 'RATE' || !/ALT HOLD.*AUTO-YAW.*TAIL RATE/.test(els.pills.innerHTML)) fail('assist keys Q / Y / V ' + els.pills.innerHTML);
 if (!/%/.test(els.vsiBar.style.height || '')) fail('climb bar not drawn');
 H.bAltclick(); H.bYawclick(); H.bTailclick(); pump(0.2);
-if (els.bAlt.firstChild.textContent !== 'ALT HOLD: OFF' || els.bYaw.firstChild.textContent !== 'AUTO-YAW: OFF' || els.bTail.firstChild.textContent !== 'TAIL: HOLD') fail('assist buttons');
+if (els.bAltV.textContent !== 'OFF' || els.bYawV.textContent !== 'OFF' || els.bTailV.textContent !== 'HOLD' || /ALT HOLD/.test(els.pills.innerHTML)) fail('assist buttons');
 key('j'); pump(0.2);
 if (els.picker.hidden || !/Pirouette/.test(els.picker.innerHTML)) fail('J opens the stunt picker');
 key('Escape'); pump(0.2);
 if (!els.picker.hidden) fail('Esc closes the picker');
 key('g'); pump(25);
 key('r'); pump(0.5);
-if (els.bArm.firstChild.textContent !== 'DISARMED' || els.toast.style.opacity !== '0') fail('reset');
+if (els.bArmL.textContent !== 'ARM' || !els.toast.hidden) fail('reset');
 if (errors.length) fail('console errors: ' + errors.join(' | '));
-ok('DOM stub: circuit (K), sensors (M), estimator (E and button), view (C), stick takeover, assists (Q / Y / V and buttons, climb bar), stunt picker (J / Esc), land (G), reset (R): no runtime errors');
+ok('DOM stub: circuit (K), sensors (M) with the health pill and sensor panel, estimator (E and button), view (C), camera view setting, settings sheet (open / Esc), stick takeover, assists (Q / Y / V and buttons, climb bar), stunt picker (J / Esc), land (G), reset (R): no runtime errors');
 console.log('SMOKE PASS');
