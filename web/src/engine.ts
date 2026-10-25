@@ -11,6 +11,23 @@ export interface Hud {
 }
 export interface StuntItem { id: number; n: string; d: string; key: string; best: number }
 export interface StuntRes { n: string; score: number; lost: string; dev: string; hdg: string; rec: string; minAlt: string }
+/** SHOW: one judged manoeuvre (marks as text, hi / lo = dropped marks) */
+export interface ShowCard { n: string; k: string; marks: string[]; hi: number; lo: number; score: string; ks: string; zero: boolean; why: string[] }
+export interface ShowLast { title: string; sens: string; total: string; max: string; pct: string; complete: boolean; note: string; rows: ShowCard[] }
+export interface ShowFrame {
+  /** setup sheet open, its choices, the parts and the schedule for it */
+  sheet: boolean; demo: boolean; part: number;
+  parts: { n: string; cnt: number; k: string }[]; sched: { n: string; k: string; hov: boolean }[];
+  /** a show is running; the scoresheet of the last show is open / exists */
+  on: boolean; resOpen: boolean; hasRes: boolean;
+  /** live: manoeuvre index / count, name, K, phase (0 position, 1 ready, 2 fly, 3 judged), demo, hovering, DONE shown, total so far */
+  i?: number; n?: number; man?: string; mk?: string; ph?: number; live?: boolean; hov?: boolean; done?: boolean; total?: string;
+  /** ghost path id; the path itself (body-origin points) only when the id changes; draw the trail */
+  gid?: number; ghost?: [number, number, number][]; trail?: boolean;
+  /** result card of the manoeuvre just judged (a few seconds) */
+  card?: ShowCard;
+  last?: ShowLast;
+}
 export interface Frame {
   p: [number, number, number]; q: [number, number, number, number];
   ep: [number, number, number]; eq: [number, number, number, number];
@@ -36,6 +53,7 @@ export interface Frame {
    *  autopilot flying the camera target, last detection [u, v, span px, yaw rad] of a 640 x 480 image (empty if none recent) */
   pip: boolean; pipSet: boolean; camSt: string; camN: number; camLock: boolean; camTgt: boolean; camDet: number[];
   toastClear: boolean; toasts: Toast[];
+  show: ShowFrame;
 }
 
 /** Command codes, matching `sim::Command` in Rust. */
@@ -43,6 +61,8 @@ export const Cmd = {
   Arm: 0, Hold: 1, Protect: 2, Sensors: 3, Level: 4, Pitch: 5, Wind: 6, Cam: 7, Reset: 8,
   Takeoff: 9, Circuit: 10, Land: 11, Autorot: 12, Takeover: 13, Estimator: 14,
   Stunts: 15, StuntFirst: 16, PickerClose: 21, AltHold: 22, AutoYaw: 23, TailRate: 24, CamView: 25,
+  Show: 26, ShowStart: 27, ShowDemo: 28, ShowManual: 29, ShowFull: 30, ShowHover: 31, ShowAero: 32,
+  ShowDone: 33, ShowStop: 34, ShowResults: 35, ShowClose: 36,
 } as const;
 
 interface Exports {
@@ -53,6 +73,8 @@ interface Exports {
   sim_step(n: number): void;
   sim_frame(): number;
   sim_out_ptr(): number;
+  sim_ff(secs: number): void;
+  sim_ghost_reset(): void;
 }
 
 export async function wasmBytes(b64: string): Promise<ArrayBuffer> {
@@ -80,6 +102,10 @@ export class Engine {
   }
   cmd(code: number) { this.x.sim_cmd(code); }
   step(n: number) { if (n > 0) this.x.sim_step(n); }
+  /** test hook: run `secs` of sim time at once (SHOW page tests) */
+  ff(secs: number) { this.x.sim_ff(secs); }
+  /** send the SHOW ghost path again in the next frame */
+  ghostReset() { this.x.sim_ghost_reset(); }
   frame(): Frame {
     const n = this.x.sim_frame(), ptr = this.x.sim_out_ptr();
     return JSON.parse(this.dec.decode(new Uint8Array(this.x.memory.buffer, ptr, n))) as Frame;

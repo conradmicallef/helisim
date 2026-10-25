@@ -2,7 +2,7 @@
 // assist pills, event toasts, the camera PiP overlay. All text and colour classes come from the
 // sim frame; this only writes them to the DOM.
 
-import type { Frame, Toast } from './engine';
+import type { Frame, ShowCard, Toast } from './engine';
 
 const $ = (id: string) => document.getElementById(id)!;
 const setText = (id: string, text: string) => { const e = $(id); if (e.textContent !== text) e.textContent = text; };
@@ -15,7 +15,10 @@ const row = (id: string, v: string, on = false, warn = false) => {
 };
 
 // autopilot mode codes from the sim
-const M = { takeoff: 0, hold: 1, circuit: 2, land: 3, rescue: 4, autorot: 5, stunt: 6 };
+const M = { takeoff: 0, hold: 1, circuit: 2, land: 3, rescue: 4, autorot: 5, stunt: 6, show: 7 };
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+/** the five judges' marks, the dropped highest and lowest struck through */
+const marks = (c: ShowCard) => `<span class="marks" aria-label="Judges' marks">${c.marks.map((m, i) => i === c.hi || i === c.lo ? `<s title="dropped">${m}</s>` : `<span>${m}</span>`).join('')}</span>`;
 
 export class Hud {
   private toastEl = $('toast');
@@ -78,6 +81,56 @@ export class Hud {
     setText('pipL', f.camSt === 'TRACKING' ? (f.camTgt ? 'LOCK · LANDING' : 'LOCK') : f.camSt);
   }
 
+  private showKey = '';
+  private scoreKey = '';
+  /** SHOW: setup sheet, live bar (manoeuvre, DONE / STOP), the result card, the scoresheet */
+  private show(f: Frame) {
+    const s = f.show;
+    const sheet = $('showSheet') as HTMLElement;
+    sheet.hidden = !s.sheet;
+    if (s.sheet) {
+      const key = JSON.stringify([s.demo, s.part]);
+      if (key !== this.showKey) {
+        this.showKey = key;
+        $('bShowDemo').classList.toggle('on', s.demo); $('bShowMan').classList.toggle('on', !s.demo);
+        $('bShowDemo').setAttribute('aria-pressed', String(s.demo)); $('bShowMan').setAttribute('aria-pressed', String(!s.demo));
+        setHtml('showPart', s.parts.map((p, i) => `<button data-part="${i}" class="${i === s.part ? 'on' : ''}" aria-pressed="${i === s.part}">${p.n}<small>${p.cnt} · ΣK ${p.k}</small></button>`).join(''));
+        setHtml('showList', s.sched.map((m, i) => (s.part === 0 || (s.part === 1) === m.hov) ? `<li><b>${i + 1}. ${m.n}</b><span>K ${m.k}</span></li>` : '').join(''));
+        setText('showNote', s.demo
+          ? 'The autopilot flies every manoeuvre in front of five judges and positions between them. Touch a stick to stop.'
+          : 'The autopilot takes you to each entry and hands over; GO in the status line means it is yours. The yellow line is the ideal path. Crash protection still works: a rescue scores that manoeuvre 0.');
+      }
+    }
+    const bar = $('showBar') as HTMLElement;
+    bar.hidden = !s.on;
+    if (s.on) {
+      setHtml('showBarT', `★ <em>${s.i! + 1}/${s.n}</em> ${esc(s.man || '')} · K ${s.mk} · <em>${s.total}</em> pts`);
+      ($('bShowDone') as HTMLElement).hidden = !s.done;
+    }
+    const card = $('showCard') as HTMLElement, c = s.card;
+    card.hidden = !c;
+    if (c) setHtml('showCard', `<h4>${esc(c.n)}<small>K ${c.k}</small></h4><div class="sc">${c.score}<small>× K = ${c.ks}</small></div>${marks(c)}` +
+      (c.why.length ? `<ul>${c.why.slice(0, 2).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''));
+    // scoresheet
+    const sc = $('score') as HTMLElement;
+    sc.hidden = !(s.resOpen && s.last);
+    const L = s.last;
+    setText('bScoreRowV', L ? `${L.pct}%` : '—');
+    ($('bScoreRow') as HTMLButtonElement).disabled = !L;
+    setText('bShowRowV', s.on ? 'RUNNING' : 'START…');
+    if (L && s.resOpen) {
+      const key = JSON.stringify(L);
+      if (key !== this.scoreKey) {
+        this.scoreKey = key;
+        setText('scoreSub', `${L.title} · ${L.sens}`.toUpperCase());
+        setHtml('scoreRows', L.rows.map((r, i) => `<div class="srow${r.zero ? ' z' : ''}"><i>${i + 1}</i><b>${esc(r.n)}<small>K ${r.k}</small></b><em>${r.score}</em><strong>${r.ks}</strong>${marks(r)}` +
+          (r.why.length ? `<ul>${r.why.slice(0, 3).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : '') + '</div>').join(''));
+        setText('scoreTot', `${L.total} / ${L.max} · ${L.pct}%`);
+        setText('scoreNote', L.complete ? 'Mean of 3 judges × K; highest and lowest struck.' : `Stopped: ${L.note}. Mean of 3 judges × K.`);
+      }
+    }
+  }
+
   update(f: Frame, dt: number) {
     if (f.toastClear) { this.toastEl.hidden = true; this.toastT = 0; }
     for (const t of f.toasts) this.showToast(t);
@@ -115,6 +168,8 @@ export class Hud {
     $('aAuto').classList.toggle('on', f.mode === M.autorot);
     const st = $('aStunt'); st.classList.toggle('on', f.mode === M.stunt || f.picker); st.setAttribute('aria-expanded', String(f.picker));
     this.picker(f);
+    const sb = $('aShow'); sb.classList.toggle('on', f.show.on || f.show.sheet); sb.setAttribute('aria-expanded', String(f.show.sheet));
+    this.show(f);
 
     // settings sheet rows
     row('bLvl', f.level ? 'SELF-LEVEL' : 'RATE');

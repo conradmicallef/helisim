@@ -2733,3 +2733,320 @@ fn t10_camera_model() {
     }
     println!("RUST CAMERA geometry: {}", lo.join(" | "));
 }
+
+// =====================================================================================
+// SHOW: F3C-style schedule, autopilot demo, fly it yourself, simulated judges
+// =====================================================================================
+use helisim::judge;
+use helisim::show::{self, Man, Part, Ph, ShowHook, ShowRes};
+
+/// Run a show (demo or manual with a stick script) until it closes. Returns the result, crashes
+/// and rescues. `script` gets the sim each 4 steps and returns stick input (manual mode).
+fn show_run(seed: u64, real: bool, part: Part, demo: bool, hook: ShowHook, mut script: impl FnMut(&Sim) -> Option<Input>) -> (ShowRes, bool, u32) {
+    let mut s = Sim::new(seed);
+    if real {
+        s.command(Command::Sensors);
+    }
+    s.show_hook = hook;
+    s.show_ui.demo = demo;
+    s.show_ui.part = part;
+    s.command(Command::ShowStart);
+    assert!(s.show.is_some(), "show did not start");
+    for i in 0..240 * 900 {
+        if i % 4 == 0 {
+            if let Some(inp) = script(&s) {
+                s.input(&inp);
+            }
+        }
+        s.step(DT);
+        if s.show.is_none() {
+            break;
+        }
+    }
+    assert!(s.show.is_none(), "show did not finish");
+    (s.show_last.clone().unwrap(), s.h.crashed, s.rescues)
+}
+
+fn show_line(tag: &str, r: &ShowRes) {
+    let per: Vec<String> = r.res.iter().map(|x| format!("{} {}", short(x.m), helisim::jsonw::to_fixed(x.score, 2))).collect();
+    println!("RUST SHOW {tag}: {} | total {:.1} / {:.0} = {:.1}%", per.join(", "), r.total, r.max, r.pct);
+}
+fn short(m: Man) -> &'static str {
+    ["SQ", "TRI", "PIR", "EIGHT", "LAND", "LOOP", "ROLL", "STALL", "RCIRC", "AUTO"][m as usize]
+}
+
+#[test]
+fn t11_show_schedule_and_references() {
+    // schedule, K-factors, parts, references inside the box and clear of the trees
+    let ks: Vec<f64> = show::SCHED.iter().map(|m| m.k()).collect();
+    assert_eq!(ks, vec![1.0, 1.5, 1.5, 2.0, 1.0, 1.5, 1.5, 2.0, 2.5, 2.0]);
+    assert_eq!(Part::Hover.list().len(), 5);
+    assert_eq!(Part::Aero.list().len(), 5);
+    assert_eq!(Part::Full.list().len(), 10);
+    for m in show::SCHED {
+        let t = show::build(m, &ShowHook::default());
+        let (mut ymin, mut ymax, mut rmax, mut xbox) = (1e9f64, -1e9f64, 0.0f64, 0.0f64);
+        for r in &t.pts {
+            ymin = ymin.min(r.p.y);
+            ymax = ymax.max(r.p.y);
+            rmax = rmax.max(r.p.x.hypot(r.p.z + 20.0));
+            if r.leg >= 2 && r.leg != 4 {
+                xbox = xbox.max((r.p.x - show::geo::AX).abs());
+            }
+            assert!(r.up.length() > 0.99 && r.p.y.is_finite());
+        }
+        println!("RUST SHOW ref {:<22} K {}  {:5.1} s  height {:5.1}..{:5.1} m  max r(0,-20) {:4.1} m  figure |x| {:4.1} m", m.name(), m.k(), t.dur, ymin, ymax, rmax, xbox);
+        assert!(rmax < 44.0, "{m:?} reaches the trees ({rmax:.1} m)");
+        if !m.hover() && m != Man::Autorot {
+            assert!(xbox <= show::geo::EDGE + 0.1, "{m:?} figure leaves the box ({xbox:.1})");
+            assert!(ymin > 10.0, "{m:?} too low ({ymin:.1})");
+        }
+    }
+}
+
+#[test]
+fn t11_show_demo_full() {
+    // autopilot demo, full schedule, IDEAL and REAL EKF, 3 seeds each
+    let mut pcts = [vec![], vec![]];
+    for (ri, real) in [false, true].into_iter().enumerate() {
+        for seed in [1100u64, 1101, 1102] {
+            let (r, crashed, resc) = show_run(seed, real, Part::Full, true, ShowHook::default(), |_| None);
+            show_line(&format!("demo {} seed {seed}", if real { "REAL" } else { "IDEAL" }), &r);
+            for x in &r.res {
+                println!("    {:<22} base {:5.2} marks {:?} drop {}/{} -> {:.2} x {} = {:5.2} | {}", x.m.name(), x.base, x.marks, x.hi, x.lo, x.score, x.k, x.ks, x.why.join("; "));
+            }
+            assert!(r.complete && r.res.len() == 10, "incomplete: {}", r.note);
+            assert!(!crashed && resc == 0, "crash {crashed} rescues {resc}");
+            assert!(r.res.iter().all(|x| x.zero.is_none()), "a zero in the demo");
+            pcts[ri].push(r.pct);
+        }
+    }
+    let m = |v: &Vec<f64>| v.iter().sum::<f64>() / v.len() as f64;
+    println!("RUST SHOW demo mean: IDEAL {:.1}% ({:.1}..{:.1}), REAL {:.1}% ({:.1}..{:.1})", m(&pcts[0]), pcts[0].iter().cloned().fold(1e9, f64::min), pcts[0].iter().cloned().fold(0.0, f64::max), m(&pcts[1]), pcts[1].iter().cloned().fold(1e9, f64::min), pcts[1].iter().cloned().fold(0.0, f64::max));
+    assert!(pcts[0].iter().all(|p| (85.0..=97.0).contains(p)), "IDEAL {:?}", pcts[0]);
+    assert!(m(&pcts[1]) < m(&pcts[0]) && pcts[1].iter().all(|p| *p > 60.0), "REAL {:?}", pcts[1]);
+}
+
+#[test]
+fn t11_show_sloppy() {
+    // the demo with injected errors: off-centre box, heading error, position sway, oversized
+    // figures, a hard landing. Scores clearly lower with the matching reasons.
+    let (good, _, _) = show_run(1110, false, Part::Full, true, ShowHook::default(), |_| None);
+    let hook = ShowHook { off: v3(3.5, 0.0, 0.0), hdg: 14f64.to_radians(), scale: 1.35, land_vs: 1.6, sway: 0.6, cut: None };
+    let (bad, crashed, resc) = show_run(1110, false, Part::Full, true, hook, |_| None);
+    show_line("nominal", &good);
+    show_line("sloppy", &bad);
+    for x in &bad.res {
+        println!("    {:<22} {:.2} | {}", x.m.name(), x.score, x.why.join("; "));
+    }
+    assert!(!crashed && resc == 0);
+    assert!(bad.pct < good.pct - 25.0, "sloppy {:.1}% vs {:.1}%", bad.pct, good.pct);
+    let why = |m: Man| bad.res.iter().find(|x| x.m == m).map(|x| x.why.join(" | ")).unwrap_or_default();
+    let all: String = bad.res.iter().map(|x| x.why.join(" | ")).collect::<Vec<_>>().join(" | ");
+    assert!(all.contains("heading off"), "heading: {all}");
+    assert!(why(Man::Square).contains("path off") || why(Man::Square).contains("corner"), "square: {}", why(Man::Square));
+    assert!(all.contains("off centre") || all.contains("of centre"), "centring: {all}");
+    assert!(why(Man::Loop).contains("too big"), "loop: {}", why(Man::Loop));
+    assert!(why(Man::Land).contains("touchdown"), "land: {}", why(Man::Land));
+}
+
+#[test]
+fn t11_show_judges() {
+    // judge statistics: spread of the five marks, drop high / low applied
+    let mut rng = helisim::rng::Rng::new(77);
+    let mut sd = vec![];
+    for show_i in 0..200 {
+        let mut bias = [0.0; 5];
+        for b in bias.iter_mut() {
+            *b = rng.rnd1() * judge::rules::BIAS;
+        }
+        let base = 5.0 + (show_i % 9) as f64 * 0.5;
+        let m = judge::marks(base, false, &bias, &mut rng);
+        assert!(m.iter().all(|x| (x * 2.0).fract() == 0.0 && (0.0..=10.0).contains(x)));
+        let mean = m.iter().sum::<f64>() / 5.0;
+        sd.push((m.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / 4.0).sqrt());
+        let (hi, lo) = judge::drop_hi_lo(&m);
+        assert!(hi != lo);
+        assert!(m.iter().all(|x| *x <= m[hi] && *x >= m[lo]));
+        let k = judge::kept_mean(&m, hi, lo);
+        let expect = (m.iter().sum::<f64>() - m[hi] - m[lo]) / 3.0;
+        assert!((k - expect).abs() < 1e-12);
+    }
+    let msd = sd.iter().sum::<f64>() / sd.len() as f64;
+    // and in a real show
+    let (r, _, _) = show_run(1120, false, Part::Hover, true, ShowHook::default(), |_| None);
+    let mut sds = vec![];
+    for x in &r.res {
+        let mean = x.marks.iter().sum::<f64>() / 5.0;
+        sds.push((x.marks.iter().map(|m| (m - mean).powi(2)).sum::<f64>() / 4.0).sqrt());
+        assert!(x.marks[x.hi] >= x.marks.iter().cloned().fold(0.0, f64::max) && x.marks[x.lo] <= x.marks.iter().cloned().fold(10.0, f64::min));
+        assert!((x.ks - x.score * x.k).abs() < 1e-9);
+    }
+    let zero = judge::marks(7.0, true, &[0.1; 5], &mut rng);
+    assert!(zero.iter().all(|x| *x == 0.0));
+    println!("RUST SHOW judges: mean std of the 5 marks {:.2} points over 200 synthetic manoeuvres (range {:.2}..{:.2}); in the hover show {:.2}", msd, sd.iter().cloned().fold(9.0, f64::min), sd.iter().cloned().fold(0.0, f64::max), sds.iter().sum::<f64>() / sds.len() as f64);
+    assert!((0.3..=0.6).contains(&msd), "judge spread {msd:.2}");
+}
+
+/// Stick pilot for the hover square: flies the true heli through the corners (stopping at each)
+/// at the hovering height, tail in; ALT HOLD on the left stick (centred = hold).
+struct SquarePilot {
+    wps: Vec<(f64, f64)>,
+    k: usize,
+    t_stop: f64,
+    started: bool,
+    ix: f64,
+    iz: f64,
+}
+impl SquarePilot {
+    fn new() -> SquarePilot {
+        let (x, z, l) = (show::geo::HX, show::geo::HZ, show::geo::SQ);
+        SquarePilot { wps: vec![(x + l / 2.0, z), (x + l / 2.0, z - l), (x - l / 2.0, z - l), (x - l / 2.0, z), (x, z)], k: 0, t_stop: 0.0, started: false, ix: 0.0, iz: 0.0 }
+    }
+    fn input(&mut self, s: &Sim) -> Option<Input> {
+        let sh = s.show.as_ref()?;
+        if sh.ph != Ph::Ready && sh.ph != Ph::Fly {
+            return None;
+        }
+        let h = &s.h;
+        // throttle: ALT HOLD; hold height (centre = hover stick), nudge toward 1.75 m
+        let hs = hover_stick(s.set.pitch3d);
+        let eh = show::geo::HA - h.alt();
+        let thr = hs + if eh.abs() > 0.1 { (0.1 + 0.15 * eh.abs().min(1.0)) * eh.signum() } else { 0.0 };
+        if !self.started {
+            self.started = true;
+        }
+        let (tx, tz) = self.wps[self.k.min(self.wps.len() - 1)];
+        let (ex, ez) = (tx - h.p.x, tz - h.p.z);
+        let d = ex.hypot(ez);
+        if d < 0.25 && h.v.hyp_xz() < 0.2 {
+            self.t_stop += DT * 4.0;
+            if self.t_stop > 1.2 && self.k < self.wps.len() - 1 {
+                self.k += 1;
+                self.t_stop = 0.0;
+            }
+        }
+        let vm = (0.8 * d).min(0.9);
+        let (vdx, vdz) = if d > 1e-6 { (ex / d * vm, ez / d * vm) } else { (0.0, 0.0) };
+        // a pilot trims out what the cyclic needs to hold a spot (wind, flapback): integral
+        self.ix = (self.ix + 0.4 * ex * DT * 4.0).clamp(-0.8, 0.8);
+        self.iz = (self.iz + 0.4 * ez * DT * 4.0).clamp(-0.8, 0.8);
+        let (ax, az) = (1.5 * (vdx - h.v.x) + self.ix, 1.5 * (vdz - h.v.z) + self.iz);
+        let (fwd, right) = fwd_right(h.q);
+        let lim = 15f64.to_radians();
+        let pa = ((ax * fwd.x + az * fwd.z) / 9.81).atan().clamp(-lim, lim);
+        let ra = ((ax * right.x + az * right.z) / 9.81).atan().clamp(-lim, lim);
+        let yaw = (-(2.0 * wrap(0.0 - heading_of(h.q))) / 4.5).clamp(-0.5, 0.5);
+        Some(Input { pit: expo_inv(pa / MAX_TILT), rol: expo_inv(ra / MAX_TILT), yaw: expo_inv(yaw), thr_set: Some(thr), ..Input::default() })
+    }
+}
+
+#[test]
+fn t11_show_manual_square() {
+    // fly it yourself: the autopilot positions at the start circle and hands over; a scripted
+    // stick pilot (ALT HOLD on) flies the square; start and finish detected, judged
+    let mut s = Sim::new(1130);
+    s.set.alt_hold = true;
+    s.show_ui.demo = false;
+    s.show_ui.part = Part::Hover;
+    s.command(Command::ShowStart);
+    let mut p = SquarePilot::new();
+    let (mut t_ready, mut t_fly, mut t_judged) = (None, None, None);
+    for i in 0..240 * 200 {
+        if i % 4 == 0 {
+            if let Some(inp) = p.input(&s) {
+                s.input(&inp);
+            }
+        }
+        s.step(DT);
+        let sh = s.show.as_ref().unwrap();
+        match sh.ph {
+            Ph::Ready if t_ready.is_none() => t_ready = Some(s.sim_t),
+            Ph::Fly if t_fly.is_none() => t_fly = Some(s.sim_t),
+            Ph::Judged if t_judged.is_none() => {
+                t_judged = Some(s.sim_t);
+                break;
+            }
+            _ => {}
+        }
+        if std::env::var("SQDBG").is_ok() && i % 240 == 0 {
+            println!("dbg t {:.1} ph {:?} p ({:.2} {:.2} {:.2}) v {:.2} k {} mode {:?} ah {} thr {:.2}", s.sim_t, sh.ph, s.h.p.x, s.h.alt(), s.h.p.z, s.h.v.hyp_xz(), p.k, mode_of(&s), s.ah.active, s.sticks.thr);
+        }
+        if i % 240 == 0 && sh.ph == Ph::Ready {
+            assert!(strip_tags(&s.cue()).contains("GO"), "{}", s.cue());
+        }
+    }
+    let sh = s.show.as_ref().unwrap();
+    let r = sh.res.last().expect("square judged");
+    println!(
+        "RUST SHOW manual square: hand-over at {:.1} s, start detected at {:.1} s, finish at {:.1} s ({:.1} s flown) | base {:.2} marks {:?} -> {:.2} | {}",
+        t_ready.unwrap(), t_fly.unwrap(), t_judged.unwrap(), t_judged.unwrap() - t_fly.unwrap(), r.base, r.marks, r.score, r.why.join("; ")
+    );
+    assert!(r.m == Man::Square && r.zero.is_none() && r.score > 3.0, "{r:?}");
+    assert!(t_judged.unwrap() - t_fly.unwrap() > 12.0);
+    assert!(s.auto.is_none(), "the pilot flies");
+    // the next manoeuvre: the autopilot positions again
+    s.steps(240 * 4);
+    assert!(s.show.as_ref().is_some_and(|sh| sh.i == 1));
+    assert_eq!(mode_of(&s), Some(Mode::Show));
+    // DONE before the start skips it (scores 0) and STOP ends the show with the results so far
+    for _ in 0..240 * 30 {
+        s.step(DT);
+        if s.show.as_ref().unwrap().ph == Ph::Ready {
+            break;
+        }
+    }
+    let sh = s.show.as_ref().unwrap();
+    assert_eq!(sh.ph, Ph::Ready, "triangle ready {:?}", sh.ph);
+    s.command(Command::ShowDone);
+    s.steps(24);
+    assert_eq!(s.show.as_ref().unwrap().res.len(), 2);
+    assert!(s.show.as_ref().unwrap().res[1].zero.is_some());
+    s.command(Command::ShowStop);
+    let r = s.show_last.as_ref().unwrap();
+    assert!(!r.complete && r.res.len() == 2);
+}
+
+#[test]
+fn t11_show_rescue() {
+    // a collective cut in the loop: crash protection takes over, the loop scores 0, the show
+    // continues with the roll and the rest
+    let hook = ShowHook { cut: Some((Man::Loop as u8, 3.5, -0.6)), ..ShowHook::default() };
+    let (r, crashed, resc) = show_run(1140, false, Part::Aero, true, hook, |_| None);
+    show_line("rescue in the loop", &r);
+    for x in &r.res {
+        println!("    {:<22} {:.2} | {}", x.m.name(), x.score, x.why.join("; "));
+    }
+    assert!(!crashed && resc >= 1, "crashed {crashed} rescues {resc}");
+    let lp = &r.res[0];
+    assert!(lp.m == Man::Loop && lp.score == 0.0 && lp.zero.as_deref().unwrap_or("").starts_with("crash protection"), "{lp:?}");
+    assert!(r.complete && r.res.len() == 5 && r.res[1..].iter().all(|x| x.score > 5.0));
+}
+
+#[test]
+fn t11_show_frame_and_commands() {
+    use helisim::wasm::*;
+    sim_init(5.0);
+    sim_cmd(Command::Show as u32);
+    let fr = || {
+        let n = sim_frame() as usize;
+        unsafe { std::str::from_utf8(std::slice::from_raw_parts(sim_out_ptr(), n)).unwrap().to_string() }
+    };
+    let s = fr();
+    assert!(s.contains("\"show\":{\"sheet\":true"), "{}", &s[s.find("\"show\"").unwrap()..][..200]);
+    sim_cmd(Command::ShowHover as u32);
+    sim_cmd(Command::ShowStart as u32);
+    sim_ff(5.0);
+    let s = fr();
+    assert!(s.contains("\"on\":true") && s.contains("\"ghost\":[[") && s.contains("\"man\":\"Hover square\""), "{s}");
+    // the ghost is sent once per manoeuvre
+    let s2 = fr();
+    assert!(!s2.contains("\"ghost\""));
+    sim_ff(40.0);
+    let s = fr();
+    assert!(s.contains("\"card\":{") || s.contains("\"ph\":"), "{s}");
+    sim_ff(140.0);
+    let s = fr();
+    assert!(s.contains("\"last\":{") && s.contains("\"rows\":[") && s.contains("Show complete"), "{s}");
+    println!("RUST SHOW frame: {} bytes with the scoresheet", s.len());
+}

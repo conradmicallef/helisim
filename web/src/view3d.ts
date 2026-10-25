@@ -12,6 +12,10 @@ const PAD = { x: 0, z: 0, color: '#ff7a1a' }, TAG = 0.9;
 const CAM_HFOV = 70, CAM_MOUNT = [0, -0.15, -0.05];
 /** 6 x 6 tag payload inside a one-cell black border (8 x 8 cells), AprilTag style */
 const TAG_BITS = ['110010', '011101', '100110', '001011', '111000', '010111'];
+/** SHOW flight box (show::geo): hovering start circle, aerobatic judging line, centre and edges */
+const BOX = { hx: 0, hz: -3.5, ax: 0, az: -14, edge: 25 };
+/** smoke trail: samples kept (at about 15 per second) */
+const TRAIL_N = 600;
 
 export class View3D {
   private renderer: InstanceType<typeof THREE.WebGLRenderer>;
@@ -32,6 +36,20 @@ export class View3D {
   private camPos = new THREE.Vector3(0, 1.7, 9);
   private camLook = new THREE.Vector3(0, 0.29, 0);
   private spin = 0; private tspin = 0;
+  /** SHOW: ghost path (ideal reference), smoke trail (flown path, fading) */
+  private ghostLine!: InstanceType<typeof THREE.Line>;
+  private ghostGid = -1;
+  private trail!: InstanceType<typeof THREE.Line>;
+  private trailPos = new Float32Array(TRAIL_N * 3);
+  private trailCol = new Float32Array(TRAIL_N * 3);
+  private trailN = 0;
+  private trailT = 0;
+  private trailOn = false;
+  private boxGroup = new THREE.Group();
+  /** called when the ghost path must be sent again (unused today: kept for a view rebuild) */
+  onLost: () => void = () => {};
+  /** SHOW state for page tests: trail points drawn, ghost path shown */
+  debug() { return { trail: this.trail.visible ? this.trailN : 0, ghost: this.ghostLine.visible ? (this.ghostLine.geometry.attributes.position?.count ?? 0) : 0 }; }
   /** downward camera for the picture-in-picture */
   private dcam = new THREE.PerspectiveCamera(2 * Math.atan(Math.tan(CAM_HFOV * Math.PI / 360) * 0.75) * 180 / Math.PI, 4 / 3, 0.05, 120);
 
@@ -96,6 +114,40 @@ export class View3D {
       rope.position.set(0, 0.85, 6.5); scene.add(rope);
       const coneG = new THREE.ConeGeometry(0.15, 0.35, 12), coneM = new THREE.MeshLambertMaterial({ color: 0xff6a1f });
       for (const [x, z] of [[-3, -3], [3, -3], [10, -10], [-8, -12], [14, -2], [-10, -20], [14, -20]]) { const m = new THREE.Mesh(coneG, coneM); m.position.set(x, 0.175, z); m.castShadow = true; scene.add(m); }
+    }
+    // SHOW flight box: judging line on the grass, centre flag, box-edge poles, start circle,
+    // judges' table beside the pilot station
+    {
+      const g = this.boxGroup;
+      const lineM = new THREE.MeshBasicMaterial({ color: 0xf4f2ea, transparent: true, opacity: 0.32, depthWrite: false });
+      const jl = new THREE.Mesh(new THREE.PlaneGeometry(BOX.edge * 2, 0.12), lineM); jl.rotation.x = -Math.PI / 2; jl.position.set(BOX.ax, 0.012, BOX.az); g.add(jl);
+      const hl = new THREE.Mesh(new THREE.PlaneGeometry(12, 0.08), lineM); hl.rotation.x = -Math.PI / 2; hl.position.set(BOX.hx, 0.012, BOX.hz); g.add(hl);
+      const sc = new THREE.Mesh(new THREE.RingGeometry(0.42, 0.5, 40), new THREE.MeshBasicMaterial({ color: 0xffd23c, transparent: true, opacity: 0.75, depthWrite: false }));
+      sc.rotation.x = -Math.PI / 2; sc.position.set(BOX.hx, 0.013, BOX.hz); g.add(sc);
+      const poleG = new THREE.CylinderGeometry(0.05, 0.06, 4, 8);
+      const red = new THREE.MeshLambertMaterial({ color: 0xe8432c }), white = new THREE.MeshLambertMaterial({ color: 0xf2f2f2 }), yel = new THREE.MeshLambertMaterial({ color: 0xffd23c, side: THREE.DoubleSide });
+      for (const sx of [-1, 1]) {
+        const p = new THREE.Mesh(poleG, red); p.position.set(BOX.ax + sx * BOX.edge, 2, BOX.az); p.castShadow = true; g.add(p);
+        const t = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.3, 0.02), white); t.position.set(BOX.ax + sx * BOX.edge, 3.8, BOX.az); g.add(t);
+      }
+      const fp = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 3, 8), white); fp.position.set(BOX.ax, 1.5, BOX.az); fp.castShadow = true; g.add(fp);
+      const flag = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.5), yel); flag.position.set(BOX.ax + 0.4, 2.7, BOX.az); g.add(flag);
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.45, 12), new THREE.MeshLambertMaterial({ color: 0xffd23c })); cone.position.set(BOX.hx, 0.225, BOX.hz - 0.9); cone.castShadow = true; g.add(cone);
+      // judges' table: a top and two trestles, five chairs, to the pilot's left
+      const tm = new THREE.MeshLambertMaterial({ color: 0xe9e4d8 }), dm = new THREE.MeshLambertMaterial({ color: 0x3a3f44 });
+      const top = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.05, 0.75), tm); top.position.set(-4.5, 0.74, 9.4); top.castShadow = true; g.add(top);
+      for (const dx of [-1.4, 1.4]) { const l = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.72, 0.6), dm); l.position.set(-4.5 + dx, 0.36, 9.4); g.add(l); }
+      for (let i = 0; i < 5; i++) { const c = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.45, 0.42), dm); c.position.set(-5.9 + i * 0.7, 0.225, 10.1); g.add(c); }
+      this.scene.add(g);
+      // ghost path (yellow, dashed look from transparency) and the smoke trail (white, fading)
+      this.ghostLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0xffd23c, transparent: true, opacity: 0.85, depthWrite: false }));
+      this.ghostLine.visible = false; this.ghostLine.frustumCulled = false; this.scene.add(this.ghostLine);
+      const tg = new THREE.BufferGeometry();
+      tg.setAttribute('position', new THREE.BufferAttribute(this.trailPos, 3));
+      tg.setAttribute('color', new THREE.BufferAttribute(this.trailCol, 3));
+      tg.setDrawRange(0, 0);
+      this.trail = new THREE.Line(tg, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.95, depthWrite: false }));
+      this.trail.frustumCulled = false; this.scene.add(this.trail);
     }
     // tree ring (instanced)
     {
@@ -218,7 +270,42 @@ export class View3D {
     r.setScissorTest(false); r.setViewport(0, 0, host.width, host.height);
   }
 
+  /** SHOW: the ideal path (rebuilt when its id changes) and the flown path as a fading smoke trail */
+  private showPaths(f: Frame, dt: number) {
+    const s = f.show;
+    if (!s.on) { this.ghostLine.visible = false; this.trail.visible = false; this.trailN = 0; this.ghostGid = -1; return; }
+    if (s.ghost && s.gid !== undefined && s.gid !== this.ghostGid) {
+      this.ghostGid = s.gid;
+      const a = new Float32Array(s.ghost.length * 3);
+      s.ghost.forEach((p, i) => { a[i * 3] = p[0]; a[i * 3 + 1] = p[1]; a[i * 3 + 2] = p[2]; });
+      this.ghostLine.geometry.dispose();
+      const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(a, 3));
+      this.ghostLine.geometry = g;
+      this.trailN = 0;
+    }
+    this.ghostLine.visible = this.ghostGid >= 0;
+    // trail: new samples while the manoeuvre is flown, fading over its length
+    const on = !!s.trail;
+    if (on && !this.trailOn) this.trailN = 0;
+    this.trailOn = on;
+    this.trailT += dt;
+    if (on && this.trailT > 1 / 15) {
+      this.trailT = 0;
+      if (this.trailN >= TRAIL_N) { this.trailPos.copyWithin(0, 3); this.trailN = TRAIL_N - 1; }
+      const i = this.trailN++ * 3;
+      this.trailPos[i] = f.p[0]; this.trailPos[i + 1] = f.p[1] - 0.15; this.trailPos[i + 2] = f.p[2];
+    }
+    const n = this.trailN;
+    for (let k = 0; k < n; k++) { const b = 0.35 + 0.65 * (n > 1 ? k / (n - 1) : 1); this.trailCol[k * 3] = b; this.trailCol[k * 3 + 1] = b; this.trailCol[k * 3 + 2] = b; }
+    const g = this.trail.geometry;
+    g.setDrawRange(0, n);
+    (g.attributes.position as InstanceType<typeof THREE.BufferAttribute>).needsUpdate = true;
+    (g.attributes.color as InstanceType<typeof THREE.BufferAttribute>).needsUpdate = true;
+    this.trail.visible = n > 1;
+  }
+
   render(f: Frame, dt: number, nowMs: number, pip?: HTMLElement | null) {
+    this.showPaths(f, dt);
     const { heli, ghost } = this;
     heli.position.set(f.p[0], f.p[1], f.p[2]); heli.quaternion.set(f.q[0], f.q[1], f.q[2], f.q[3]);
     ghost.visible = f.real;

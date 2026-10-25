@@ -75,6 +75,10 @@ pub fn is_event(title: &str) -> bool {
         "Throttle not low", "Battery flat", "Battery too low", "Already on the ground", "Stunt in progress", "Land first",
         "Controller connected", "Settling with power",
     ];
+    const EV2: [&str; 3] = ["Show complete", "Show stopped", "Battery too low for the show"];
+    if EV2.iter().any(|e| title.starts_with(e)) {
+        return true;
+    }
     EV.iter().any(|e| title.starts_with(e))
         || title.contains(" landing on")
         || title.contains(" landing off")
@@ -135,6 +139,25 @@ pub enum Command {
     TailRate = 24,
     /// toggle the downward camera picture-in-picture between automatic and always (REAL)
     CamView = 25,
+    /// SHOW: open / close the setup sheet
+    Show = 26,
+    /// SHOW: start with the sheet's choices
+    ShowStart = 27,
+    /// SHOW setup: autopilot demo / fly it yourself
+    ShowDemo = 28,
+    ShowManual = 29,
+    /// SHOW setup: full schedule / hovering only / aerobatics only
+    ShowFull = 30,
+    ShowHover = 31,
+    ShowAero = 32,
+    /// SHOW: the pilot says the manoeuvre is done (judge it now; skip it before the start)
+    ShowDone = 33,
+    /// SHOW: stop the show
+    ShowStop = 34,
+    /// SHOW: open / close the scoresheet of the last show
+    ShowResults = 35,
+    /// SHOW: close the setup sheet
+    ShowClose = 36,
 }
 
 impl Command {
@@ -167,6 +190,17 @@ impl Command {
             23 => AutoYaw,
             24 => TailRate,
             25 => CamView,
+            26 => Show,
+            27 => ShowStart,
+            28 => ShowDemo,
+            29 => ShowManual,
+            30 => ShowFull,
+            31 => ShowHover,
+            32 => ShowAero,
+            33 => ShowDone,
+            34 => ShowStop,
+            35 => ShowResults,
+            36 => ShowClose,
             _ => return None,
         })
     }
@@ -238,6 +272,14 @@ pub struct Sim {
     /// low-passed estimated vertical acceleration and the last vertical speed (ground-proximity predictor)
     pub ay_f: f64,
     pub vy_prev: f64,
+    /// SHOW: the running show, the setup sheet, the last result, test hooks
+    pub show: Option<crate::show::Show>,
+    pub show_ui: crate::show::ShowUi,
+    pub show_last: Option<crate::show::ShowRes>,
+    pub show_hook: crate::show::ShowHook,
+    pub show_n: u32,
+    /// ghost path id (changes with each manoeuvre: the page rebuilds the line)
+    pub show_gid: u32,
 }
 
 impl Sim {
@@ -272,6 +314,12 @@ impl Sim {
             ah: crate::assist::AltHold::default(),
             ay_f: 0.0,
             vy_prev: 0.0,
+            show: None,
+            show_ui: crate::show::ShowUi::default(),
+            show_last: None,
+            show_hook: crate::show::ShowHook::default(),
+            show_n: 0,
+            show_gid: 0,
         };
         s.sens.cam.rng = Rng::new(seed ^ 0x5eed_ca3e);
         s.reset_heli();
@@ -338,6 +386,11 @@ impl Sim {
     // ---------- commands ----------
     pub fn command(&mut self, c: Command) {
         use Command::*;
+        // a flight mode, stunt or reset ends a running show
+        let demo_hold = c == Hold && self.show.as_ref().is_some_and(|s| s.demo);
+        if self.show.is_some() && (demo_hold || matches!(c, Reset | Takeoff | Circuit | Land | Autorot | StuntPirouette | StuntLoop | StuntRoll | StuntFlip | StuntInverted | Arm)) {
+            self.show_stop("cancelled");
+        }
         match c {
             Arm => self.toggle_arm(),
             Hold => {
@@ -387,9 +440,47 @@ impl Sim {
             Autorot => self.start_auto(Mode::Autorot, false, false, false, false),
             Takeover => {
                 self.picker = false;
+                // the demo: a stick touch stops the show (fly it yourself: the pilot flies)
+                if self.show.as_ref().is_some_and(|s| s.demo) && !matches!(&self.auto, Some(a) if a.mode == Mode::Rescue && a.t < 1.5) {
+                    self.show_stop("you took control");
+                }
                 self.cancel_auto(true)
             }
             CamView => self.set.pip = !self.set.pip,
+            Show => {
+                self.picker = false;
+                if self.show.is_some() {
+                    self.show_ui.sheet = false;
+                } else {
+                    self.show_ui.sheet = !self.show_ui.sheet;
+                    self.show_ui.res_open = false;
+                }
+            }
+            ShowClose => self.show_ui.sheet = false,
+            ShowStart => {
+                if self.show.is_none() {
+                    self.show_start();
+                }
+            }
+            ShowDemo => self.show_ui.demo = true,
+            ShowManual => self.show_ui.demo = false,
+            ShowFull => self.show_ui.part = crate::show::Part::Full,
+            ShowHover => self.show_ui.part = crate::show::Part::Hover,
+            ShowAero => self.show_ui.part = crate::show::Part::Aero,
+            ShowDone => {
+                if let Some(sh) = self.show.as_mut() {
+                    if matches!(sh.ph, crate::show::Ph::Ready | crate::show::Ph::Fly) {
+                        sh.done_req = true;
+                    }
+                }
+            }
+            ShowStop => self.show_stop("stopped by the pilot"),
+            ShowResults => {
+                self.show_ui.res_open = !self.show_ui.res_open && self.show_last.is_some();
+                if self.show_ui.res_open {
+                    self.show_ui.sheet = false;
+                }
+            }
             Stunts => self.picker = !self.picker,
             PickerClose => self.picker = false,
             AltHold => {
@@ -510,6 +601,9 @@ impl Sim {
         let wind = self.physics(cmd, dt);
         self.wind = wind;
         self.sensors_update(dt, wind);
+        if self.show.is_some() {
+            self.show_tick(dt);
+        }
     }
 
     pub fn steps(&mut self, n: u32) {
@@ -763,6 +857,9 @@ impl Sim {
         if h.crashed {
             return "Crashed. Tap <em>RESET</em> to put a fresh heli on the pad.".into();
         }
+        if let Some(c) = self.show_cue() {
+            return c;
+        }
         if let Some(a) = &self.auto {
             let take = " Touch any stick to take control.";
             if a.mode == Mode::Rescue {
@@ -809,6 +906,7 @@ impl Sim {
                     }
                 }
                 Mode::Rescue | Mode::Stunt => unreachable!(),
+                Mode::Show => return "Show: positioning.".into(),
             }
         }
         if !h.armed {

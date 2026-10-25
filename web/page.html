@@ -41,6 +41,9 @@ i.k{font-style:normal;font:500 10px/1 var(--f-data);color:var(--ink-dim);margin-
 #bSet span{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 #bSet{padding:0 10px}
 .actbar .ap.on{background:var(--cool);border-color:var(--cool);color:#06192a}
+#aShow{border-color:rgba(255,210,60,.6);color:#fff1c4}
+#aShow.on{background:#ffd23c;border-color:#ffd23c;color:#241a02}
+#aShow.on i.k{color:#5a4706}
 .actbar .ap.on i.k{color:#0d3352}
 #bArm.armed{background:var(--armed);border-color:var(--armed);color:#fff}
 #bArm.armed i.k{color:#ffe1dc}
@@ -145,6 +148,56 @@ i.k{font-style:normal;font:500 10px/1 var(--f-data);color:var(--ink-dim);margin-
 .picker button:disabled{opacity:.45;cursor:not-allowed}
 .picker p{margin:2px 4px;font-size:11px;color:var(--ink-dim)}
 
+/* SHOW: setup sheet, live bar, result card, scoresheet */
+.showSheet{pointer-events:auto;width:min(420px,100%);box-sizing:border-box;background:var(--panel-solid);border:1px solid rgba(255,210,60,.6);border-radius:8px;padding:10px;
+  display:flex;flex-direction:column;gap:8px}
+.showSheet[hidden],.showBar[hidden],.showCard[hidden],#score[hidden]{display:none}
+.showSheet header{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.showSheet h2{margin:0;font:700 18px/1 var(--f-display);letter-spacing:.04em}
+.showSheet h2 small{display:block;font:600 10px/1.4 var(--f-display);letter-spacing:.18em;color:#ffd23c}
+.seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:3px}
+.seg button{min-height:36px;padding:4px 6px;border-radius:6px;border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer;
+  font:600 13px/1.1 var(--f-display);letter-spacing:.04em}
+.seg button small{display:block;font:400 10px/1.3 var(--f-data);color:var(--ink-dim);letter-spacing:0}
+.seg button.on{background:rgba(255,210,60,.16);border-color:#ffd23c}
+.showSheet ol{margin:0;padding:0;list-style:none;display:grid;grid-template-columns:1fr;gap:1px;font-size:11.5px;color:var(--ink-dim)}
+.showSheet ol li{display:flex;justify-content:space-between;gap:6px;white-space:nowrap;overflow:hidden}
+.showSheet ol li b{color:var(--ink);font-weight:600;overflow:hidden;text-overflow:ellipsis}
+.showSheet p{margin:0;font-size:11px;line-height:1.45;color:var(--ink-dim)}
+.showSheet .go{min-height:40px;border-radius:7px;border:1px solid #ffd23c;background:#ffd23c;color:#241a02;font:700 16px/1 var(--f-display);letter-spacing:.08em;cursor:pointer}
+.showSheet button:focus-visible,.showBar button:focus-visible,#score button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.showBar{pointer-events:auto;display:flex;align-items:center;gap:6px;flex-wrap:wrap;background:var(--panel);border:1px solid rgba(255,210,60,.55);border-radius:14px;padding:3px 4px 3px 10px;
+  font:600 12px/1 var(--f-display);letter-spacing:.06em;max-width:100%;box-sizing:border-box}
+.showBar span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.showBar em{font-style:normal;color:#ffd23c}
+.showBar button{min-height:26px;padding:0 10px;border-radius:11px;border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer;font:700 11px/1 var(--f-display);letter-spacing:.1em}
+.showBar button.done{background:#ffd23c;border-color:#ffd23c;color:#241a02}
+.showCard{pointer-events:none;background:var(--panel-solid);border:1px solid #ffd23c;border-radius:8px;padding:7px 12px;max-width:380px;box-sizing:border-box;
+  display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:center}
+.showCard h4{margin:0;font:600 15px/1.2 var(--f-display);letter-spacing:.03em}
+.showCard h4 small{font:400 11px/1 var(--f-data);color:var(--ink-dim);margin-left:4px}
+.showCard .sc{grid-row:span 2;font:700 30px/1 var(--f-display);color:#ffd23c;text-align:right}
+.showCard .sc small{display:block;font:400 10px/1.3 var(--f-data);color:var(--ink-dim)}
+.marks{display:flex;gap:4px;font:600 12px/1 var(--f-data);font-variant-numeric:tabular-nums}
+.marks s{color:var(--ink-dim);text-decoration-thickness:1.5px}
+.showCard ul{grid-column:1/-1;margin:2px 0 0;padding-left:14px;font-size:11px;line-height:1.4;color:var(--ink-dim)}
+#score .card{max-width:560px;gap:8px;box-sizing:border-box}
+#score h1{font-size:26px}
+#score .tot{display:flex;justify-content:space-between;align-items:baseline;gap:8px;border-top:1px solid var(--line);padding-top:6px}
+#score .tot b{font:700 24px/1 var(--f-display);color:#ffd23c;white-space:nowrap}
+#score .tot span{font-size:12px;color:var(--ink-dim)}
+.sheetRows{display:flex;flex-direction:column;gap:2px;max-height:min(60vh,560px);overflow:auto}
+.srow{display:grid;grid-template-columns:1.4em 1fr auto auto;gap:2px 8px;align-items:baseline;padding:5px 2px;border-bottom:1px solid var(--line);font-size:12px}
+.srow > i{font-style:normal;color:var(--ink-dim)}
+.srow > b{font:600 14px/1.2 var(--f-display);letter-spacing:.03em}
+.srow > b small{font:400 10.5px/1 var(--f-data);color:var(--ink-dim);margin-left:4px;letter-spacing:0}
+.srow > em{font-style:normal;font-variant-numeric:tabular-nums;color:var(--ink-dim)}
+.srow > strong{font:700 15px/1 var(--f-display);color:#ffd23c;text-align:right;min-width:3.2em}
+.srow .marks,.srow ul{grid-column:2/-1}
+.srow ul{margin:0;padding-left:14px;font-size:10.5px;line-height:1.4;color:var(--ink-dim)}
+.srow.z > strong{color:var(--armed)}
+/* nine actions: a little tighter below 1040 px so they stay on one row */
+@media (min-width:821px) and (max-width:1040px){.actbar{gap:3px}.actbar button{padding:0 6px;gap:4px;letter-spacing:.04em}#bSet{padding:0 8px}}
 /* narrow tablets: tighter action bar */
 @media (min-width:561px) and (max-width:820px){.actbar button{padding:0 6px;font-size:12px;letter-spacing:.04em;gap:4px}.actbar button i.k{display:none}.actbar svg{width:15px;height:15px}}
 /* phones (portrait): one row of icon buttons with tiny labels; toasts and assist pills in a strip just above the sticks */
@@ -164,6 +217,12 @@ i.k{font-style:normal;font:500 10px/1 var(--f-data);color:var(--ink-dim);margin-
   .sheet{top:auto;left:0;right:0;width:auto;max-height:74%;border-radius:12px 12px 0 0;animation:slideUp .18s ease-out}
   .picker{grid-template-columns:1fr 1fr;padding:4px;gap:3px}.picker button{min-height:36px;padding:4px 6px;font-size:13px;gap:6px}
   .picker button span small,.picker button em{display:none}.picker p{grid-column:1/-1}
+  /* the bar is full on a portrait phone: SHOW lives in the settings sheet (and on key B) */
+  #aShow{display:none}
+  .showSheet{width:100%}
+  .showCard{max-width:100%}
+  #score .card{padding:14px 12px 12px}
+  .srow{grid-template-columns:1.2em 1fr auto auto;gap:2px 6px}
 }
 /* phone landscape: the action bar is a slim column on the left, the field gets the width */
 @media (orientation:landscape) and (max-height:500px){
@@ -221,9 +280,19 @@ i.k{font-style:normal;font:500 10px/1 var(--f-data);color:var(--ink-dim);margin-
       <button id="aLand" class="ap" data-tip="Fly back and land on the pad (G)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M6.5 9.5 12 15l5.5-5.5M4 20.5h16"/></svg><span>LAND</span><i class="k">G</i></button>
       <button id="aAuto" class="ap" data-tip="Practice autorotation onto the pad (U)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 5.5h19M12 5.5v4"/><path d="M12 13v7M8 16.5l4 3.5 4-3.5"/></svg><span>AUTOROT</span><i class="k">U</i></button>
       <button id="aStunt" class="ap" aria-haspopup="true" aria-expanded="false" data-tip="Stunt picker (J)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.6 5.6 6.1.7-4.5 4.2 1.2 6L12 16.6l-5.4 2.9 1.2-6-4.5-4.2 6.1-.7z"/></svg><span>STUNTS</span><i class="k">J</i></button>
+      <button id="aShow" aria-haspopup="dialog" aria-expanded="false" data-tip="Competition SHOW: an F3C-style schedule, judged (B)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="9" r="6"/><path d="m12 6 1 2.1 2.3.3-1.7 1.6.4 2.3-2-1.1-2 1.1.4-2.3-1.7-1.6 2.3-.3z"/><path d="M8.3 13.8 7 21.5l5-2.6 5 2.6-1.3-7.7"/></svg><span>SHOW</span><i class="k">B</i></button>
       <button id="bSet" aria-haspopup="dialog" aria-expanded="false" aria-controls="sheet" data-tip="Settings, assists, sensors, view and session"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/></svg><span>SETTINGS</span></button>
     </nav>
     <div class="picker" id="picker" hidden role="menu" aria-label="Stunts"></div>
+    <div class="showSheet" id="showSheet" hidden role="dialog" aria-label="Competition show">
+      <header><h2><small>F3C-STYLE SCHEDULE · 5 JUDGES</small>Competition show</h2><button class="x" id="bShowX" aria-label="Close the show sheet">✕</button></header>
+      <div class="seg" id="showWho"><button id="bShowDemo">Autopilot demo<small>watch it fly</small></button><button id="bShowMan">Fly it yourself<small>you fly, it judges</small></button></div>
+      <div class="seg" id="showPart"></div>
+      <ol id="showList"></ol>
+      <p id="showNote"></p>
+      <button class="go" id="bShowGo">START</button>
+    </div>
+    <div class="showBar" id="showBar" hidden><span id="showBarT"></span><button id="bShowDone" class="done" hidden>DONE</button><button id="bShowStop">STOP</button></div>
     <div class="cue" id="cue" role="status">Read the briefing, then tap <em>ARM</em>.</div>
     <button class="hpill" id="hp" hidden aria-expanded="false" aria-controls="sens">EKF OK</button>
     <div class="sens" id="sens" hidden></div>
@@ -238,6 +307,7 @@ i.k{font-style:normal;font:500 10px/1 var(--f-data);color:var(--ink-dim);margin-
       </div>
     </div>
     <div class="mid">
+      <div class="showCard" id="showCard" hidden role="status" aria-live="polite"></div>
       <div id="toast" hidden role="status" aria-live="polite"></div>
       <div class="pills" id="pills" aria-label="Assists on"></div>
     </div>
@@ -274,11 +344,18 @@ i.k{font-style:normal;font:500 10px/1 var(--f-data);color:var(--ink-dim);margin-
       <div class="stats"><div><b>LANDINGS</b><span id="oLand">0 · best —</span></div><div><b>FLIGHT</b><span id="oTime">0:00</span></div>
         <div><b>RESCUES</b><span id="oResc">0</span></div><div><b>STUNTS</b><span id="oStunts">0</span></div></div>
       <div class="sres" id="sres" hidden></div>
+      <button class="row" id="bShowRow" data-tip="Competition show: autopilot demo or fly it yourself"><span>SHOW</span><b id="bShowRowV">START…</b><i class="k">B</i></button>
+      <button class="row" id="bScoreRow" data-tip="The scoresheet of the last show"><span>LAST SHOW</span><b id="bScoreRowV">—</b></button>
       <button class="row" id="bReset" data-tip="A fresh heli and pack on the pad"><span>RESET</span><b id="bResetV">NEW HELI</b><i class="k">R</i></button>
       <button class="row" id="bHelp" data-tip="The briefing card"><span>HELP</span><b id="bHelpV">BRIEFING</b></button>
     </section>
   </aside>
 
+  <div class="overlay" id="score" hidden role="dialog" aria-label="Scoresheet">
+    <div class="card"><h1><small id="scoreSub">SCORESHEET</small>Scoresheet</h1><div class="sheetRows" id="scoreRows"></div>
+      <div class="tot"><span id="scoreNote"></span><b id="scoreTot"></b></div>
+      <div class="row"><button id="bScoreX">Close</button></div></div>
+  </div>
   <div class="overlay" id="help">
     <div class="card">
       <h1><small>600-CLASS · FLYBARLESS · MODE 2</small>RC Heli Field</h1>
@@ -296,12 +373,13 @@ i.k{font-style:normal;font:500 10px/1 var(--f-data);color:var(--ink-dim);margin-
       <p>Self-level gyro returns the heli to level when you let go of the right stick. Switch to rate mode for real flybarless behaviour. 3D pitch puts zero thrust at mid-stick and allows inverted flight.</p>
       <p><b style="color:var(--cool)">Autopilot:</b> TAKEOFF spools up, climbs to 3 m and holds a hover. CIRCUIT flies continuous laps of a racetrack in front of you at 5 m and 5 m/s until you tap LAND or touch a stick. LAND flies back to the pad: fast and high (up to 8 m/s, 8 to 12 m, clear of the trees) when it is far out, then a gentle approach and a slow descent onto the pad. AUTOROTATE climbs to 25 m, cuts the motor and glides down to the pad to show a practice autorotation. Touch any stick to take control back.</p>
       <p><b style="color:var(--cool)">Stunts:</b> ★ STUNTS (J) opens a list: pirouette, loop, roll, flip and inverted hover (keys 1 to 5 while it is open). The autopilot climbs to a safe height, builds speed along the field for the loop and roll, switches to 3D pitch for the manoeuvre, then recovers to a hover and scores it on height lost, drift, heading and recovery time. During a stunt, crash protection ignores bank angle and only steps in if the heli gets too low, loses headspeed or the manoeuvre runs long. In REAL sensor mode the GPS antenna loses the sky upside down, so watch the estimate drift and snap back. Touch a stick to take over; if you are inverted at that moment, pitch stays on 3D.</p>
+      <p><b style="color:#ffd23c">Show:</b> ★ SHOW (B) flies an F3C-style competition schedule in front of five simulated judges: five hovering manoeuvres at the start circle (square, triangle, descending pirouette, nose-in figure eight, landing on the pad) and five aerobatics centred on the flag in the box (loop, roll, stall turn, rolling circle, autorotation), each with a difficulty factor K. Watch the autopilot fly it, or fly it yourself: the autopilot takes you to each entry, the yellow line shows the ideal path, GO in the status line means it's yours, and DONE ends a manoeuvre early. Each judge marks 0 to 10; the highest and lowest are dropped. Not an official FAI schedule.</p>
       <p><b style="color:var(--ink)">Modelled:</b> translational lift once you are moving faster than a walk, settling with power if you sink straight down under power, the tail weathervaning in a crosswind and kicking when motor torque changes, headspeed sag at full collective and on a tired battery, autorotation with THR HOLD, and a flapping rotor disc that lags the swashplate, blows back with airspeed and couples pitch and roll.</p>
       <p><b style="color:var(--good)">Assists:</b> The throttle is finer around the hover point: half the usual collective per stick movement within about 12% of hover, so small corrections stay small. ALT HOLD (Q) makes the left stick a climb-rate stick in the air: centre holds height, up climbs at up to 3 m/s, down descends at up to 2 m/s (1 m/s near the ground); on the ground it is the normal throttle, so lift off as usual and it takes over above 0.5 m. AUTO-YAW (Y) turns the nose into the airflow above 3 m/s and yaws with you when you roll into a turn; your yaw stick still works on top. TAIL (V) switches the tail gyro between HOLD (heading lock) and RATE (no lock, the tail weathervanes into the wind like a basic gyro). The bar beside the left stick shows climb rate, ±3 m/s, red when sinking fast near the ground, with a blue mark for the ALT HOLD target.</p>
       <p><b style="color:var(--ink)">Crash protection</b> (PROTECT, on by default) takes over if the heli over-banks, sinks fast near the ground, is about to touch down while moving fast or tilted, settles with power or loses headspeed. It levels the heli, climbs to a hover and hands back control. At 15% battery the autopilot lands on the pad. At 8% it lands and will not let go.</p>
       <p><b style="color:var(--ink)">Sensors:</b> IDEAL lets the flight controller see the true state. REAL makes it rely on a noisy gyro, accelerometer, compass, barometer, rangefinder, GPS and ESC telemetry, so hover wanders a little and the blue ghost shows where it thinks the heli is. ESTIMATOR: EKF blends them with a Kalman filter that weighs each sensor by how noisy it is, tracks gyro and barometer drift and throws out GPS jumps that don't fit (the faint ring around the ghost is its position uncertainty). A downward camera finds the black-and-white tag on the pad: once it is TRACKING, LAND lines up on the tag rather than on GPS and touches down within a hand's width of the centre. The small camera view appears in a corner while landing. BASIC is a simpler filter with fixed blending, so a GPS glitch pulls the heli off its spot.</p>
       <p><b style="color:var(--ink)">Screen:</b> the bar across the top holds the flight actions; the gear opens the settings (gyro, pitch curve, assists, sensors, view, stats, reset). Green pills by the sticks show the assists that are on. In REAL mode the pill under the status line shows the estimator health; tap it for the sensor panel.</p>
-      <p class="keys">Keys: W/S throttle · A/D yaw · arrow keys cyclic · Space arm · H throttle hold · X crash protection · M sensors · E estimator · U autorotate · J stunts (1-5 to pick) · R reset · C view · T takeoff · K circuit · G land · Q alt hold · Y auto-yaw · V tail gyro · Esc closes the settings. A USB transmitter or gamepad also works.</p>
+      <p class="keys">Keys: W/S throttle · A/D yaw · arrow keys cyclic · Space arm · H throttle hold · X crash protection · M sensors · E estimator · U autorotate · J stunts (1-5 to pick) · B show · R reset · C view · T takeoff · K circuit · G land · Q alt hold · Y auto-yaw · V tail gyro · Esc closes the settings. A USB transmitter or gamepad also works.</p>
       <div class="row"><button id="bGo">Go to the flight line</button></div>
     </div>
   </div>

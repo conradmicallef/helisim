@@ -220,11 +220,20 @@ pub fn rotvec(q: Quat) -> V3 {
 /// Attitude from a body up vector (world) and a heading: the nose is the heading direction
 /// projected into the plane normal to `up` (works upright and inverted).
 pub fn quat_up_heading(up: V3, heading: f64) -> Quat {
+    quat_up_nose(up, v3(-heading.sin(), 0.0, -heading.cos()))
+}
+
+/// Attitude from a body up vector and a nose hint (both world): the nose is the hint projected
+/// into the plane normal to `up` (any direction, also vertical: loops and stall turns).
+pub fn quat_up_nose(up: V3, nose_hint: V3) -> Quat {
     let u = up.normalize();
-    let f0 = v3(-heading.sin(), 0.0, -heading.cos());
+    let f0 = nose_hint;
     let mut nose = f0 - u * f0.dot(u);
     if nose.length_sq() < 1e-8 {
         nose = v3(0.0, 0.0, -1.0) - u * (-u.z);
+    }
+    if nose.length_sq() < 1e-8 {
+        nose = v3(1.0, 0.0, 0.0) - u * u.x;
     }
     let nose = nose.normalize();
     let right = nose.cross(u);

@@ -14,6 +14,8 @@
 //!   autorotation, battery failsafe
 //! - `assist`: throttle curve, ALT HOLD, AUTO-YAW, tail RATE, ground-proximity predictor
 //! - `stunt`: STUNTS (pirouette, loop, roll, flip, inverted hover) and their scoring
+//! - `show` + `judge`: SHOW, an F3C-style competition schedule (reference paths, autopilot demo,
+//!   fly-it-yourself detection) and five simulated judges
 //! - `sim`: world step, commands, landing grading, toasts, HUD and cue text
 //! - `jsonw`, `wasm`: frame serialisation and the page interface
 
@@ -23,11 +25,13 @@ pub mod ekf;
 pub mod estimator;
 pub mod fbl;
 pub mod heli;
+pub mod judge;
 pub mod jsonw;
 pub mod math;
 pub mod precland;
 pub mod rng;
 pub mod sensors;
+pub mod show;
 pub mod sim;
 pub mod stunt;
 pub mod units;

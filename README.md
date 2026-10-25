@@ -4,7 +4,8 @@
 
 A 600-class flybarless RC helicopter on a flying field, seen from the pilot station. You fly it with two
 on-screen gimbals (Mode 2), the keyboard or a USB transmitter / gamepad, or let the autopilot take off,
-hold, fly racetrack laps, land or demonstrate an autorotation. Crash protection, a low-battery failsafe
+hold, fly racetrack laps, land or demonstrate an autorotation, or fly an F3C-style competition SHOW in
+front of five simulated judges (watch the autopilot fly it, or fly it yourself). Crash protection, a low-battery failsafe
 and a REAL sensor mode (the flight controller flies on noisy, delayed sensors, including a downward
 camera that finds the tag on the pad for precision landings) are modelled. There is one landing pad, in
 front of the pilot station.
@@ -12,7 +13,7 @@ front of the pilot station.
 This is a port of the single-file JavaScript page (`rc-heli-field.html`, three.js r128) to the same
 architecture as the circuit autopilot project: a Rust core compiled to WebAssembly owns all simulation,
 control, autopilot, sensor and rule logic, and a TypeScript page only renders, gathers input and calls
-the exports. The built page is one self-contained HTML file of about 139 KB.
+the exports. The built page is one self-contained HTML file of about 195 KB.
 
 ## Layout
 
@@ -20,7 +21,7 @@ the exports. The built page is one self-contained HTML file of about 139 KB.
 |---|---|
 | `rust/` | crate `helisim`: lib (rlib + cdylib) and a native `helisim` bin for quick runs |
 | `rust/tests/suites.rs` | native ports of the JS harnesses test.js .. test5.js, with asserts |
-| `rust/examples/` | `stunt_dev` (trace one stunt), `inv_diag` (per-seed EKF diagnostics through a stunt: bias, tilt, velocity errors, fusion counts), `land_far` (LAND from 30 / 45 m, 5 seeds: time, heights, accuracy; `real`, `nocam`), `land_trace` (one LAND traced every 0.5 s with the camera target error), `fs_far` (battery failsafe far from the pad) |
+| `rust/examples/` | `show_dev` (fly the SHOW demo and print every judged manoeuvre; `real`, `hover` / `aero`, `trace <i>`), `show_ref` (print a SHOW reference), `stunt_dev` (trace one stunt), `inv_diag` (per-seed EKF diagnostics through a stunt: bias, tilt, velocity errors, fusion counts), `land_far` (LAND from 30 / 45 m, 5 seeds: time, heights, accuracy; `real`, `nocam`), `land_trace` (one LAND traced every 0.5 s with the camera target error), `fs_far` (battery failsafe far from the pad) |
 | `web/page.html` | all CSS and DOM of the original page, three.js r128 from cdnjs, `/*WASM*/` and `/*BUNDLE*/` placeholders |
 | `web/src/` | TypeScript UI (below) |
 | `web/build.sh` | Rust -> wasm32, wasm-opt, tsc, esbuild, embed -> `rc-heli-field.html` |
@@ -40,6 +41,8 @@ the exports. The built page is one self-contained HTML file of about 139 KB.
 | `fbl` | rotor head (flapping disc, servos, hub moment, flapback, head bob) and the flybarless gyro: rate loop, self-level, heading-hold tail |
 | `assist` | flying assists: throttle curve, ALT HOLD, AUTO-YAW, tail RATE, ground-proximity predictor |
 | `stunt` | STUNTS: pirouette, loop, roll, flip, inverted hover; profiles, scoring, cue text |
+| `show` | SHOW: the F3C-style schedule, flight box, reference generators, the reference-tracking controller of the demo, positioning, start / finish detection, the show state machine, cue text |
+| `judge` | SHOW judging: deviations from the reference, downgrade rules, five judges with bias and noise, drop high / low |
 | `sensors` | gyro, accelerometer, magnetometer, rangefinder, barometer, GPS, ESC rpm and battery telemetry, each on its own clock; runs the camera and the target estimator |
 | `precland` | downward camera (pad tag detection from geometry) and the precision-landing target estimator |
 | `estimator` | BASIC complementary filter; `Est` is what every controller sees |
@@ -55,8 +58,8 @@ the exports. The built page is one self-contained HTML file of about 139 KB.
 |---|---|
 | `engine.ts` | base64 -> DecompressionStream('gzip') -> WebAssembly.instantiate; wraps the exports; `Frame` type; command codes |
 | `input.ts` | touch gimbals, keys, gamepad axes (raw values only) |
-| `view3d.ts` | three.js scene, the pad with its camera tag, heli model, ghost, windsock, pilot / chase / pad cameras, and the downward camera rendered into the picture-in-picture box (scissored viewport of the same renderer) |
-| `hud.ts` | readouts, status line, estimator pill and sensor panel, assist pills, event toasts, action bar and settings states, PiP detection box, all from the frame |
+| `view3d.ts` | three.js scene, the SHOW flight box (judging line, centre flag, edge poles, start circle, judges' table), the SHOW ghost path and smoke trail, the pad with its camera tag, heli model, ghost, windsock, pilot / chase / pad cameras, and the downward camera rendered into the picture-in-picture box (scissored viewport of the same renderer) |
+| `hud.ts` | SHOW setup sheet, live bar, result card and scoresheet, readouts, status line, estimator pill and sensor panel, assist pills, event toasts, action bar and settings states, PiP detection box, all from the frame |
 | `main.ts` | wiring, the settings sheet (open / close / Esc), desktop tooltips, the frame loop |
 | `three.ts` | the global `THREE` from the script tag, typed with @types/three 0.128 |
 
@@ -68,8 +71,10 @@ Only plain numbers cross the boundary.
 |---|---|
 | `sim_init(seed)` | new sim with a seed |
 | `sim_input(yaw, pit, rol, thrDelta, thrSet, gp, g0, g1, g2, g3)` | this frame's input; `thrSet` < 0 means the touch throttle did not move; `gp` = 1 with gamepad axes 0..3 |
-| `sim_cmd(code)` | 0 arm, 1 hold, 2 protect, 3 sensors, 4 level, 5 pitch, 6 wind, 7 cam, 8 reset, 9 takeoff, 10 circuit, 11 land, 12 autorotate, 13 takeover (a stick was touched), 14 estimator EKF / BASIC, 15 stunt picker toggle, 16..20 fly pirouette / loop / roll / flip / inverted hover, 21 close the picker, 22 ALT HOLD, 23 AUTO-YAW, 24 tail HOLD / RATE, 25 camera view AUTO / ALWAYS (codes 0..24 unchanged) |
+| `sim_cmd(code)` | 0 arm, 1 hold, 2 protect, 3 sensors, 4 level, 5 pitch, 6 wind, 7 cam, 8 reset, 9 takeoff, 10 circuit, 11 land, 12 autorotate, 13 takeover (a stick was touched), 14 estimator EKF / BASIC, 15 stunt picker toggle, 16..20 fly pirouette / loop / roll / flip / inverted hover, 21 close the picker, 22 ALT HOLD, 23 AUTO-YAW, 24 tail HOLD / RATE, 25 camera view AUTO / ALWAYS, 26 SHOW sheet, 27 start, 28 / 29 demo / fly it yourself, 30 / 31 / 32 full / hovering / aerobatics, 33 DONE, 34 STOP, 35 scoresheet, 36 close the sheet (codes 0..25 unchanged) |
 | `sim_step(n)` | n fixed steps of 1/240 s |
+| `sim_ff(secs)` | test hook: run `secs` of sim time at once (page tests of the show; the page never calls it) |
+| `sim_ghost_reset()` | send the SHOW ghost path again in the next frame |
 | `sim_frame()` | builds the JSON frame, returns its length; read it at `sim_out_ptr()` |
 
 Per animation frame the page sends input, runs the elapsed fixed steps (at most 24, the remainder is
@@ -80,7 +85,8 @@ decided in Rust; the page writes it to the DOM. New fields (all additions): `hud
 headspeed readout), `hud.health` / `hud.healthC` (the collapsed estimator pill), `pip` / `pipSet` (show the
 camera view, user setting), `camSt` / `camN` / `camLock` / `camTgt` (camera status, detections, tag locked,
 LAND flying the camera target), `camDet` (last detection `[u, v, span px, yaw]` of a 640 x 480 image, empty
-if none in the last 0.25 s) and `ev` on each toast (an event the page shows; see "Page layout").
+if none in the last 0.25 s), `ev` on each toast (an event the page shows; see "Page layout") and `show`
+(the SHOW sheet, the live manoeuvre, the ghost path when it changes, the result card and the last scoresheet).
 
 ## Models
 
@@ -348,6 +354,7 @@ regressed: every other table in this README was rerun with the new filter.
 | Battery failsafe | at 15% (2 s debounce) lands on the pad (the same LAND, transit included), a stick touch takes over; at 8% forced landing that ignores sticks and keys (no climb above the height it is at) |
 
 | STUNTS (J) | picker of five manoeuvres, below |
+| SHOW (B) | the competition schedule, see "Show mode" |
 
 All of it reads only the estimated state, from whichever estimator is selected.
 
@@ -578,6 +585,153 @@ Key T stays takeoff, so the tail gyro is on V. `cargo test --release --test suit
 | Tail HOLD / RATE, hover in 4.5 m/s crosswind, 15 s | HOLD within 1.7 deg; RATE weathervanes 64 deg toward the wind; RATE set + autopilot hover: within 1.0 deg |
 | Throttle curve | monotonic, f(0) = 0, f(1) = 1, f(hover) = hover, slope 0.50 at hover, 1.14-1.39 outside, normal and 3D |
 
+## Show mode (`show`, `judge`)
+
+★ SHOW (key B; on a portrait phone, where the action bar is full, it is the SHOW row in the settings
+sheet) opens a small sheet: **Autopilot demo** or **Fly it yourself**, **Full schedule**, **Hovering only**
+or **Aerobatics only**, and START. It is an F3C-style precision routine: a hovering section and an
+aerobatic section, each manoeuvre with a K-factor, flown in a box in front of the judges and marked
+0..10 by five simulated judges. FAI F3C schedules change between seasons. This is **not** an official
+schedule: the names are descriptive and the judging rules are in the spirit of the real ones, not
+the rules themselves.
+
+### Flight box
+
+World axes: x to the pilot's right, z toward the pilot, the pad at the origin, the pilot station
+and the judges at z = +9, the flight-line rope at z = +6.5.
+
+| | |
+|---|---|
+| Hovering line | z = -3.5 (10 m beyond the rope), start circle (yellow ring and cone) at (0, -3.5), hovering height 1.75 m of skid height |
+| Aerobatic judging line | z = -14 (20.5 m beyond the rope), a faint line on the grass, centre flag at x = 0, box-edge poles at x = +-25 m |
+| Aerobatic heights | 12..15 m entry (loop 12, stall turn 13, roll and rolling circle 15), up to 26 m at the top of the loop; run-up from rest at x = -+40 m outside the box |
+| Trees | every reference stays inside r < 43 m of (0, -20) (trees at r >= 45 m), asserted |
+| Judges' table | a table and five chairs to the pilot's left at (-4.5, 9.4) |
+
+### Schedule
+
+| # | Manoeuvre | K | Reference (what the autopilot flies and the judges compare against) |
+|---|---|---|---|
+| 1 | Hover square | 1.0 | 4 m square beyond the start circle at 1.75 m, tail in: half leg right, three full legs, half leg back, s-curve legs, 1.5 s stops at each corner and on the circle (28 s) |
+| 2 | Hover triangle | 1.5 | vertical triangle in the hovering plane: diagonal climb right to (+3, 4.75 m), across to (-3, 4.75 m), diagonal descent back to the circle, stops at the corners (22 s) |
+| 3 | Descending pirouette | 1.5 | over the circle, one 360 deg turn while descending 5 -> 2 m, descent locked to the turn (constant rate after 0.3 s ramps), position held (10 s) |
+| 4 | Nose-in figure eight | 2.0 | horizontal eight of two 2 m circles through the start circle at 1.75 m, 1.4 m/s, nose toward the judges throughout (22 s) |
+| 5 | Stop and landing | 1.0 | from the circle to over the pad, 2 s stop, vertical descent at `0.3 + 0.35 h` m/s (0.6 .. 0.3), touchdown on the centre (12 s) |
+| 6 | Loop | 1.5 | run-up to 8.5 m/s along the line at 12 m, a 7 m loop at the centre flag (speed along the loop from `v' = 2 (8.5 - v)` within the 1.9 g the disc gives beyond the centripetal force, about 5.3 m/s over the top), exit line out of the box, stop (21 s) |
+| 7 | Roll | 1.5 | 8 m/s at 15 m, one axial roll at 230 deg/s centred on the flag (prescribed attitude, from 10 deg nose down, sine-ramped rate like the stunts), exit line, stop (16 s) |
+| 8 | Stall turn | 2.0 | 8 m/s at 13 m, 6 m pull-up to vertical before the flag, ballistic vertical climb to 3 m/s, a 0.8 s 180 deg pivot (nose over toward the judges), vertical dive, 6 m pull-out on the reciprocal line, stop (19 s) |
+| 9 | Rolling circle | 2.5 | **simplified**: a level 360 deg turn away from the judges (9 m radius, 7 m/s, 15 m) with one full axial roll at the far point. The roll is flown wings level on a 13 m chord across the far side, so the figure is two half circles joined by the roll chord, centred on the box. A real rolling circle blends several rolls into the whole circle (29 s) |
+| 10 | Autorotation | 2.0 | the AUTOROTATE autopilot: entry 38 m upwind of the pad at 25 m, run-in, throttle hold, glide, flare, cushion, touchdown at the pad. Its reference is drawn only (cut point, glide line, flare); its judging is geometric |
+
+Each reference is a 50 Hz table of position, velocity, acceleration (central differences), body up
+and nose, attitude rate and a weight for prescribed attitude. Body up comes from the specific force
+the path needs (`a + g + drag`, upright or inverted by a hint) except in rolls. Duration and the entry
+point and heading come with it. Total K: hovering 7.0, aerobatics 9.5, full 16.5 (165 points).
+
+### Flying it
+
+- **Autopilot demo.** The `Show` autopilot mode (code 7) positions for each entry (the LAND transit
+  beyond 5 m, then a slow line-up to 0.25 m / 0.15 m/s / 4 deg for hovering, 1.5 m / 0.6 m/s / 8 deg for
+  aerobatics, held 1 s) and then flies the reference with a reference-tracking thrust-vector
+  controller: the reference acceleration plus position and velocity feedback (hover 1.0 / 2.2,
+  aerobatics 0.8 / 1.8 1/s), the specific force with drag fed forward, body up from that force, nose
+  from the reference, body rates toward that attitude with the reference rate fed forward (the stunts'
+  attitude loop), collective from the force along the shaft. In rolls the collective holds height with
+  the vertical thrust it has (the stunt-roll law, faded at knife edge). Aerobatics switch to the 3D
+  pitch curve; the user's curve comes back after each one (stick remapped, no collective jump), as in
+  the stunts. The autorotation hands over to AUTOROTATE (throttle hold). A stick touch stops the show.
+- **Fly it yourself.** The autopilot takes you to each entry and hands over (a stick touch during
+  the positioning means you position yourself: the status line says where). The status line shows
+  `GO`, the manoeuvre name and a one-line instruction, the yellow line in the 3D view is the ideal
+  reference, and the white smoke trail (fading) is the flown path. Start is detected when you leave
+  the entry point (hover: 0.4 m or 10 deg), enter the box (aerobatics) or switch throttle hold on
+  (autorotation). Finish: stopped back on the end point for 1 s (hover), out of the box after at least
+  2 s in it (aerobatics), 1 s after touchdown (landings), or DONE in the show bar. DONE before the
+  start skips the manoeuvre (0). Aerobatics switch to 3D pitch here too. Assists and crash protection apply.
+- **Crash protection.** During the aerobatics the stunt-aware rules apply (no bank / inverted
+  trigger; too low < 6 m, headspeed < 75 %, overrunning the reference by 1.5 s in the demo); a manual
+  autorotation gets the autorotation rules. A rescue scores that manoeuvre 0 ("crash protection: ...")
+  and the show continues with the next once recovered. The battery failsafe waits for the end of an
+  aerobatic manoeuvre, then stops the show. A crash ends the show (the rest score 0). A show started
+  on the ground gets a fresh pack. TAKEOFF, LAND, ARM, RESET, stunts and (demo) THR HOLD stop it.
+
+### Judging rules
+
+Every rule is "beyond a tolerance, 1 point per unit", at most 4 points per rule, summed and taken
+off 10: in the spirit of the "1 point per 15 deg of deviation" guideline of FAI aerobatics judging,
+not the official F3C criteria. All measured on the **true** state (what judges see), the 90th percentile
+where it says "path" or "height", the figure itself where it says so.
+
+| Manoeuvre | Downgrades (tolerance, 1 point per) |
+|---|---|
+| all | smoothness: attitude wobble = RMS of body rate minus its 0.14 s moving average (hover 4 deg/s, per 5; aerobatics 8, per 6; autorotation 6, per 6) |
+| square, triangle | path distance to the reference (0.25 m, per 0.5 m) and the leg where it was worst; height (square, 0.15 m, per 0.3) or drift off the vertical plane (triangle, 0.25 m, per 0.5); heading (3 deg, per 15 deg) and the leg; each corner missed (0.3 m, per 0.6) and 0.5 for no stop (slower than 0.3 m/s within 0.8 m); size from the corners (8%, per 20%); centring of the figure (0.4 m, per 1); finish off the circle (0.3 m, per 0.5) |
+| descending pirouette | drift off the spot (0.25 m, per 0.4); rotation vs 360 deg (5, per 15 deg); yaw-rate variation (8%, per 20%); descent-rate variation (12%, per 25%); turn and descent out of step (0.6 s, per 1.5); start / end heights (0.25 m, per 0.5) |
+| figure eight | path (0.25 m, per 0.5) and the circle; height (0.15, per 0.3); nose-in heading (4 deg, per 15); circle size mismatch from least-squares circle fits (0.2 m, per 0.5); size (10%, per 20%); centring (0.4 m, per 1) |
+| landing | touchdown speed (0.45 m/s, per 0.25); distance from the pad centre (0.15 m, per 0.25); sliding (0.2 m/s, per 0.3); 1.0 for no stop over the pad; drift in the descent (0.15 m, per 0.4); height before the descent (0.15, per 0.3); heading (4 deg, per 15) |
+| loop | radius variation from a circle fit (0.6 m, per 1.2); size (10%, per 25%); centring on the flag (1.5 m, per 3); drift off the line (0.4, per 1); exit height (0.4, per 1); exit track vs entry (4 deg, per 15) |
+| roll | height lost or gained (0.3 m, per 0.6); drift off the line (0.8, per 1); centring (1.5, per 3); roll-rate variation (12%, per 20%); exit track (3 deg, per 15); exit height (0.4, per 1) |
+| stall turn | vertical line wander (0.5 m, per 1); centring (1.5, per 3); pivot wander at the top (0.6, per 1); climb height vs the reference (15%, per 25%); pull-out height (0.5, per 1); exit line vs entry line (0.3, per 0.8); exit track vs the reciprocal (4 deg, per 15) |
+| rolling circle | path vs the reference (0.8 m, per 1.2); depth vs size (10%, per 25%); height (0.6, per 1); roll vs the far point (1.5 m, per 2.5); centring (1.5, per 3); exit track (5 deg, per 15); exit line (0.5, per 1) |
+| autorotation | 0 if throttle hold is not on, or power comes back before touchdown; touchdown speed (0.6 m/s, per 0.4); distance from the pad (1.2 m, per 1.5); sliding (1, per 1); glide line (0.8 m, per 1.5); glide descent-rate variation (0.4 m/s, per 0.8); glide heading (5 deg, per 15) |
+| zero | not flown, no figure found (no inverted point in a loop / roll, no vertical in a stall turn), crash protection, crash, skipped |
+
+**Judges.** Five judges, each with a personal bias drawn once per show (uniform +-0.3 points) and
+noise per mark (Gaussian, sigma 0.3): mark = base + bias + noise, rounded to 0.5, clamped 0..10 (a zero
+is 0 from every judge). The highest and lowest marks are dropped (ties: the first highest, the last
+lowest); the manoeuvre score is the mean of the other three, times K. Total = sum, also as a percentage of
+10 x sum(K). The judges' random stream is separate from the flight's, so judging never changes the flight.
+
+**On the page.** After each manoeuvre a result card (above the sticks, 6 s): name, K, the score and
+score x K, the five marks with the dropped two struck through, the top two reasons. At the end the
+scoresheet (manoeuvre, K, marks with the dropped ones struck, score, score x K, the top three reasons,
+total and %); it opens by itself and again from LAST SHOW in the settings. The live bar under the action
+bar shows the manoeuvre, K, points so far, DONE (fly it yourself) and STOP. Rust decides all text.
+
+### Results
+
+`cargo test --release --test suites t11 -- --nocapture` (breeze):
+
+Autopilot demo, full schedule, 3 seeds each: completes, 0 crashes, 0 rescues, no zero.
+
+| Seed | SQ | TRI | PIR | EIGHT | LAND | LOOP | ROLL | STALL | RCIRC | AUTO | total |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| IDEAL 1100 | 9.50 | 9.00 | 9.50 | 9.33 | 9.50 | 9.50 | 8.00 | 8.67 | 8.83 | 9.17 | 149.4 / 165 = **90.6%** |
+| IDEAL 1101 | 9.00 | 9.00 | 9.50 | 9.50 | 9.33 | 9.33 | 8.17 | 8.83 | 8.83 | 9.33 | 149.8 = **90.8%** |
+| IDEAL 1102 | 9.50 | 9.33 | 9.33 | 9.50 | 9.50 | 9.67 | 8.33 | 8.83 | 9.17 | 9.50 | 152.6 = **92.5%** |
+| REAL EKF 1100 | 7.00 | 9.00 | 8.50 | 9.00 | 7.50 | 9.33 | 7.50 | 8.83 | 8.33 | 9.00 | 140.5 = **85.2%** |
+| REAL EKF 1101 | 6.00 | 5.00 | 7.50 | 7.17 | 9.33 | 9.33 | 8.00 | 8.67 | 8.33 | 9.50 | 131.6 = **79.7%** |
+| REAL EKF 1102 | 7.50 | 6.00 | 8.00 | 9.17 | 8.17 | 9.33 | 8.17 | 7.33 | 9.17 | 8.33 | 135.5 = **82.1%** |
+
+Mean IDEAL 91.3%, REAL 82.3%. IDEAL loses most on the roll ("lost 0.7 m in the roll", "drifted 1.2 m
+off the line": the disc can't hold height or line at knife edge) and on smoothness. REAL loses on the
+hovering figures (GPS-referenced position wanders 0.5..1 m: "path off by 0.9 m on the third leg",
+"drifted 1.0 m off the spot", "touched down 0.40 m from the pad centre") and once on the autorotation
+("landed 2.2 m from the pad"). A full show takes about 10 sim minutes and leaves 22..29% battery.
+
+| Test | Result |
+|---|---|
+| Sloppy (the demo with the reference shifted 3.5 m right, 14 deg heading error, 0.6 m sway on the hover legs, figures 35% too big, a 1.6 m/s landing) | 92.3% -> **43.5%**, no rescue. Reasons as expected: "path off by 4.6 m on the second leg", "eight 2.9 m off centre", "nose-in heading off 15 deg", "touchdown 1.80 m/s", "no stop over the pad", "loop 35% too big", "loop 3.6 m right of centre", "roll 4.1 m right of centre", "climb 23% too high", "circle 35% too big". The autorotation (flown by AUTOROTATE, no hooks) keeps 9.17 |
+| Judge statistics | std of the five marks 0.34 points mean over 200 synthetic manoeuvres (0.00..0.76), 0.38 in a hovering show; marks on 0.5 steps in 0..10; the dropped two are the highest and lowest; score = mean of the other three; a zero is 0 from all five |
+| Fly it yourself: a scripted stick pilot (ALT HOLD on, looks at the true heli, stops at each corner) flies the hover square | hand-over at 9.2 s, start detected at 10.4 s, finish (back on the circle) at 51.2 s; judged 8.83 ("path off by 1.1 m on the fourth leg"); then the autopilot positions for the triangle, DONE before its start scores it 0, STOP ends the show with 2 results |
+| Rescue in a show: collective cut to -0.6 3.5 s into the loop | crash protection "too low in the loop: 6.0 m", loop 0.00, recovered, the show goes on: roll 8.00, stall turn 8.50, rolling circle 9.17, autorotation 9.33, 74.3% |
+| References | all ten inside the box (|x| <= 25 m for the figures), above 12 m for the aerobatics, clear of the trees |
+| Frame | the `show` object adds about 1 KB (3.3 KB frame with the scoresheet); the ghost path (50..150 points) is sent once per manoeuvre |
+
+Page tests (`web/test/browser.mjs`, SHOW part, fast-forwarded with `sim_ff`): B opens the sheet (10
+manoeuvres, Hovering only -> 5 with their K), START, the bar and cue, the ghost path (143 points) and
+the smoke trail drawn, a result card with five marks and two struck through, the final scoresheet
+(5 rows, 10 struck marks, total and %), LAST SHOW from the settings, Esc; then on a 390 px touch phone
+SHOW from the settings sheet, the sheet, a card and the scoresheet within the width and no horizontal
+scroll. Screenshots `show-sheet.png`, `show-trail.png`, `show-card.png`, `show-scoresheet.png`,
+`phone-show-*.png` (to `SHOW_SHOTS` or the shots directory).
+
+What is simplified: the rolling circle (above); the roll is a straight-and-level axial roll at a fixed
+rate (no slow or point rolls); the stall turn pivots toward the judges on a fixed 0.8 s schedule; the
+judges are formulas plus noise, with no "first impression" or style beyond the wobble metric; there
+are no zeros for leaving the box sideways (only centring downgrades); manual start / finish detection
+is geometric (DONE covers the rest).
+
 ## Page layout
 
 The old page put 18 buttons in 9 rows, a cue and a toast saying the same thing, sticky tooltips, key-letter
@@ -586,8 +740,8 @@ hints and six readouts over about two thirds of a phone screen. The new layout k
 
 | | |
 |---|---|
-| Action bar | ARM, THR HOLD, TAKEOFF, CIRCUIT, LAND, AUTOROT, STUNTS and the settings gear, icon + short label, the active mode lit (autopilot modes blue, ARMED red, THR HOLD orange). One row on desktop and phones (icons with tiny labels, 42 px tall); a slim 52 px column on the left in phone landscape so the field gets the width; the stunt picker opens under it |
-| Settings (gear) | slides in as a 320 px side panel on desktop, up from the bottom on phones; closes on an outside tap, the close button or Esc. Groups: FLYING (gyro, pitch curve, crash protection, wind), ASSISTS (alt hold, auto-yaw, tail gyro), SENSORS (sensors, estimator), VIEW (view: pilot / chase / pad close-up, camera view: auto / always), SESSION (landings and best, flight time, rescues, stunts, last stunt result, reset, help). Rows show their value; green when an assist is on, red only for crash protection off |
+| Action bar | ARM, THR HOLD, TAKEOFF, CIRCUIT, LAND, AUTOROT, STUNTS, SHOW (yellow) and the settings gear, icon + short label, the active mode lit (autopilot modes blue, ARMED red, THR HOLD orange, SHOW yellow). One row on desktop and phones (icons with tiny labels, 42 px tall; on a portrait phone SHOW moves to the settings sheet to keep 8 buttons); a slim 52 px column on the left in phone landscape so the field gets the width; the stunt picker and the SHOW sheet open under it |
+| Settings (gear) | slides in as a 320 px side panel on desktop, up from the bottom on phones; closes on an outside tap, the close button or Esc. Groups: FLYING (gyro, pitch curve, crash protection, wind), ASSISTS (alt hold, auto-yaw, tail gyro), SENSORS (sensors, estimator), VIEW (view: pilot / chase / pad close-up, camera view: auto / always), SESSION (landings and best, flight time, rescues, stunts, last stunt result, SHOW, LAST SHOW scoresheet, reset, help). Rows show their value; green when an assist is on, red only for crash protection off |
 | Status line | the existing cue, the one place for "what is happening" |
 | Toasts | events only (landed, crashed, crash protection, recovered, battery failsafe, stunt result, GPS reset, refused commands), decided in Rust (`Toast::ev`); shown for 3 s in a strip just above the sticks, never over the centre of the view. Mode-change and setting toasts are dropped: the status line, the lit button or the settings row already says it |
 | Readouts | ALT, V/S, SPEED, BATTERY. HEADSPEED appears only outside 90..105%, in throttle hold or in an autorotation. THROTTLE is gone (the left stick shows it). In REAL mode one blue EST badge at the end replaces the four "(EST)" labels |
@@ -616,7 +770,7 @@ Most of what is left is the two 150 px sticks (about 14% of a portrait phone on 
 
 ## Tests: Rust vs JS
 
-`cargo test --release -- --nocapture --test-threads=1` in `rust/` (44 suites: the 26 below plus 7 `t8_*` stunt suites (including the full matrices), 7 `t9_*` assist suites and 4 `t10_*` landing transit / camera suites; plus `tests/step.rs`, about 10 s; the 7 `t7_ekf_*`
+`cargo test --release -- --nocapture --test-threads=1` in `rust/` (51 suites: the 26 below plus 7 `t8_*` stunt suites (including the full matrices), 7 `t9_*` assist suites, 4 `t10_*` landing transit / camera suites and 7 `t11_*` SHOW suites; plus `tests/step.rs`, about 10 s; the 7 `t7_ekf_*`
 suites are the EKF vs BASIC table above) against the JS harnesses `node test*.js rc-heli-field.html` on the original page. The JS uses Math.random, the Rust
 a seeded RNG, so noisy numbers agree within noise rather than to the digit. The REAL rows now run on
 the EKF (the default); the BASIC column of the table above is the original estimator.
@@ -700,7 +854,8 @@ wasm frame JSON (mode code, toasts drained after each frame).
   and fading, the stunt picker and a Pirouette (result toast and session stats), and ALT HOLD / AUTO-YAW with
   their pills and the climb bar. On a 390 x 844 touch phone: no tooltips or key hints, no horizontal scroll, one row
   of eight 42 px action buttons, sticks in the bottom corners, the climb bar, the picker, the bottom sheet and
-  its outside tap. On 844 x 390: the action bar as a column, sticks in the corners. There are no page errors.
+  its outside tap. On 844 x 390: the action bar as a column, sticks in the corners. Then the SHOW part
+  (see "Show mode"). There are no page errors.
   Screenshots: `desktop.png`, `settings-open.png`, `real-landing-pip.png`, `phone-portrait.png`,
   `phone-picker.png`, `phone-settings-open.png`, `phone-landscape.png` and `before-*.png`. `QUICK=1` skips the coverage pass.
 
@@ -729,7 +884,7 @@ submodule (rust-lang/backtrace-rs at 28ec93b5), and copied to
 missing. The `wasm` profile is opt-level z, LTO, one codegen unit, panic abort, stripped. The crate
 has no dependencies.
 
-Sizes: wasm 148 KB raw, 91 KB gzip+base64 embedded; bundle 19 KB; page 142,672 bytes (139 KiB). Before this change: wasm 136 KB, bundle 17 KB, page 120,394 bytes.
+Sizes: wasm 225 KB raw, 132 KB gzip+base64 embedded; bundle 26 KB; page 199,169 bytes (195 KiB). Before SHOW: wasm 148 KB, 91 KB embedded, bundle 19 KB, page 142,672 bytes. The judge and the reference builder are most of the 82 KB (the std sort was replaced by an insertion sort to keep its code out).
 
 ## Licence
 

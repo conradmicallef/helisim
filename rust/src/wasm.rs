@@ -13,6 +13,22 @@ thread_local! {
     static SIM: RefCell<Option<Sim>> = const { RefCell::new(None) };
     static OUT: RefCell<Json> = RefCell::new(Json::new());
     static INPUT: RefCell<Input> = RefCell::new(Input::default());
+    /// last ghost path id sent to the page (0 = none)
+    static GID: RefCell<u32> = const { RefCell::new(0) };
+}
+
+/// SHOW test hook: fast-forward. Runs `secs` of sim time (whole 1/240 s steps) without frames,
+/// for page tests of the show (the page itself never calls it).
+#[no_mangle]
+pub extern "C" fn sim_ff(secs: f64) {
+    let n = (secs.max(0.0) * 240.0).round() as u32;
+    with(|s| s.steps(n));
+}
+
+/// Force the ghost path into the next frame (the page lost it, e.g. after a reload of the view).
+#[no_mangle]
+pub extern "C" fn sim_ghost_reset() {
+    GID.with(|g| *g.borrow_mut() = 0);
 }
 
 fn with<R>(f: impl FnOnce(&mut Sim) -> R) -> R {
@@ -205,6 +221,12 @@ fn write_frame(s: &mut Sim, j: &mut Json) {
             }
         }
     }
+    // SHOW
+    let gid = GID.with(|g| *g.borrow());
+    write_show(s, j, gid);
+    if let Some(sh) = &s.show {
+        GID.with(|g| *g.borrow_mut() = sh.gid);
+    }
     // toasts raised since the last frame
     j.bool("toastClear", s.toast_clear);
     j.arr("toasts");
@@ -222,3 +244,112 @@ fn write_frame(s: &mut Sim, j: &mut Json) {
     j.end_obj();
 }
 
+
+/// SHOW: the setup sheet, the live manoeuvre (name, K, phase, ghost path, result cards) and the
+/// last show's scoresheet. The ghost path is sent only when its id changes (`gid`).
+fn write_show(s: &Sim, j: &mut Json, gid_sent: u32) {
+    use crate::jsonw::to_fixed;
+    use crate::show::{Man, Part, SCHED};
+    let u = &s.show_ui;
+    j.obj("show");
+    j.bool("sheet", u.sheet);
+    j.bool("demo", u.demo);
+    j.int("part", u.part as i64);
+    j.arr("parts");
+    for p in [Part::Full, Part::Hover, Part::Aero] {
+        j.obj("");
+        j.str("n", p.name());
+        let l = p.list();
+        j.int("cnt", l.len() as i64);
+        j.str("k", &to_fixed(l.iter().map(|m| m.k()).sum::<f64>(), 1));
+        j.end_obj();
+    }
+    j.end_arr();
+    j.arr("sched");
+    for m in SCHED {
+        j.obj("");
+        j.str("n", m.name());
+        j.str("k", &to_fixed(m.k(), 1));
+        j.bool("hov", m.hover());
+        j.end_obj();
+    }
+    j.end_arr();
+    j.bool("on", s.show.is_some());
+    j.bool("resOpen", u.res_open);
+    j.bool("hasRes", s.show_last.is_some());
+    let card = |j: &mut Json, k: &str, r: &crate::show::ManRes| {
+        j.obj(k);
+        j.str("n", r.m.name());
+        j.str("k", &to_fixed(r.k, 1));
+        j.arr("marks");
+        for m in r.marks {
+            j.str("", &to_fixed(m, 1));
+        }
+        j.end_arr();
+        j.int("hi", r.hi as i64);
+        j.int("lo", r.lo as i64);
+        j.str("score", &to_fixed(r.score, 2));
+        j.str("ks", &to_fixed(r.ks, 2));
+        j.bool("zero", r.zero.is_some());
+        j.arr("why");
+        for w in r.why.iter() {
+            j.str("", w);
+        }
+        j.end_arr();
+        j.end_obj();
+    };
+    if let Some(sh) = &s.show {
+        let m = sh.man();
+        j.int("i", sh.i as i64);
+        j.int("n", sh.list.len() as i64);
+        j.str("man", m.name());
+        j.str("mk", &to_fixed(m.k(), 1));
+        j.int("ph", sh.ph as i64);
+        j.bool("live", sh.demo);
+        j.bool("hov", m.hover());
+        // DONE: fly it yourself, ready or flying
+        j.bool("done", !sh.demo && matches!(sh.ph, crate::show::Ph::Ready | crate::show::Ph::Fly));
+        j.str("total", &to_fixed(sh.res.iter().map(|r| r.ks).sum::<f64>(), 1));
+        j.int("gid", sh.gid as i64);
+        if sh.gid != gid_sent {
+            j.arr("ghost");
+            for p in sh.nom.ghost() {
+                j.sep_item();
+                j.buf.push('[');
+                j.buf_num(p.x);
+                j.buf.push(',');
+                j.buf_num(p.y);
+                j.buf.push(',');
+                j.buf_num(p.z);
+                j.buf.push(']');
+            }
+            j.end_arr();
+        }
+        // trail: record from the start of the manoeuvre (fly-it-yourself: from Ready)
+        j.bool("trail", matches!(sh.ph, crate::show::Ph::Fly | crate::show::Ph::Ready));
+        if let Some(r) = sh.res.last() {
+            if s.sim_t - r.t < crate::show::CARD_T && sh.res.len() == sh.i + 1 {
+                card(j, "card", r);
+            }
+        }
+        let _ = Man::Square;
+    }
+    if let Some(r) = &s.show_last {
+        // the full scoresheet (also the result card of the final manoeuvre)
+        j.obj("last");
+        j.str("title", &format!("{} · {}", r.part.name(), if r.demo { "autopilot demo" } else { "flown by you" }));
+        j.str("sens", if r.real { if r.ekf { "REAL sensors, EKF" } else { "REAL sensors, BASIC" } } else { "IDEAL sensors" });
+        j.str("total", &to_fixed(r.total, 1));
+        j.str("max", &to_fixed(r.max, 0));
+        j.str("pct", &to_fixed(r.pct, 1));
+        j.bool("complete", r.complete);
+        j.str("note", &r.note);
+        j.arr("rows");
+        for x in r.res.iter() {
+            card(j, "", x);
+        }
+        j.end_arr();
+        j.end_obj();
+    }
+    j.end_obj();
+}

@@ -180,6 +180,16 @@ impl Json {
         }
         self.buf.push('"');
     }
+    /// Comma before the next array item (for hand-written items).
+    pub fn sep_item(&mut self) {
+        self.sep();
+    }
+    /// A bare number without a separator.
+    pub fn buf_num(&mut self, v: f64) {
+        let f = self.first;
+        self.raw_num(v);
+        self.first = f;
+    }
     pub fn v3(&mut self, k: &str, v: crate::math::V3) {
         self.arr(k);
         for x in [v.x, v.y, v.z] {

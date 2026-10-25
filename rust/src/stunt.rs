@@ -356,13 +356,13 @@ impl Sim {
         }
     }
 
-    fn rpm_k(&self, up_y: f64, ip: f64) -> f64 {
+    pub(crate) fn rpm_k(&self, up_y: f64, ip: f64) -> f64 {
         let rpm = self.est.rpm.max(0.3);
         TMAX * rpm * rpm * ge_of(self.est.p.y, up_y) * eta_of(ip)
     }
 
     /// Collective that holds a vertical acceleration `az` with the disc where it is.
-    fn coll_vert(&self, az: f64, up: V3) -> f64 {
+    pub(crate) fn coll_vert(&self, az: f64, up: V3) -> f64 {
         let uy = up.y;
         let d = if uy.abs() < 1e-3 { 1e-3f64.copysign(uy) } else { uy };
         let t = clamp((G + az) / d, -prof::T_LIM * G, prof::T_LIM * G) * clamp(uy.abs() / prof::FADE, 0.0, 1.0);
@@ -374,7 +374,7 @@ impl Sim {
     }
 
     /// Rate demand toward a reference attitude, body frame, with a feed-forward rate.
-    fn att_rate(&self, q_des: Quat, w_ff: V3) -> (V3, f64) {
+    pub(crate) fn att_rate(&self, q_des: Quat, w_ff: V3) -> (V3, f64) {
         let e = rotvec(self.est.q.inv() * q_des);
         let mut w = e * prof::K_ATT + w_ff;
         let m = w.length();
@@ -385,7 +385,7 @@ impl Sim {
     }
 
     /// Thrust-vector hover controller (upright or inverted): position, altitude and heading hold.
-    fn tv_hold(&self, p_ref: V3, alt_ref: f64, hdg: f64, yaw_ff: f64, inverted: bool) -> (Cmd, f64) {
+    pub(crate) fn tv_hold(&self, p_ref: V3, alt_ref: f64, hdg: f64, yaw_ff: f64, inverted: bool) -> (Cmd, f64) {
         let est = &self.est;
         let (mut vx, mut vz) = (0.9 * (p_ref.x - est.p.x), 0.9 * (p_ref.z - est.p.z));
         let vm = vx.hypot(vz);

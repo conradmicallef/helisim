@@ -106,6 +106,8 @@ pub enum Mode {
     Rescue = 4,
     Autorot = 5,
     Stunt = 6,
+    /// SHOW: positioning for and flying the competition schedule
+    Show = 7,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -515,7 +517,7 @@ impl Sim {
         if by_user && (a.forced || (a.mode == Mode::Rescue && a.t < 1.5)) {
             return; // hands-off phases
         }
-        let was_stunt = a.mode == Mode::Stunt || a.mode == Mode::Rescue;
+        let was_stunt = a.mode == Mode::Stunt || a.mode == Mode::Rescue || a.mode == Mode::Show;
         self.auto = None;
         self.auto_out = None;
         let mut sub3d = false;
@@ -603,7 +605,15 @@ impl Sim {
             } else if run > s.t_exp + 1.5 {
                 why = Some(format!("{} overran by {} s", s.kind.name(), to_fixed(run - s.t_exp, 1)));
             }
-        } else if self.auto.as_ref().is_some_and(|a| a.ar_unpowered()) {
+        } else if let Some((name, t, exp, demo)) = self.show_window() {
+            if alt < 6.0 {
+                why = Some(format!("Too low in the {}: {} m", name.to_lowercase(), to_fixed(alt, 1)));
+            } else if est.rpm < 0.75 {
+                why = Some(format!("Headspeed {}% in the {}", pct(est.rpm), name.to_lowercase()));
+            } else if demo && t > exp + 1.5 {
+                why = Some(format!("{} overran by {} s", name, to_fixed(t - exp, 1)));
+            }
+        } else if self.auto.as_ref().is_some_and(|a| a.ar_unpowered()) || self.show_ar_window() {
             if est.rpm < 0.65 && alt > 4.0 {
                 why = Some(format!("Headspeed {}%", pct(est.rpm)));
             } else if tilt > 45.0 {
@@ -656,6 +666,10 @@ impl Sim {
         if self.auto.as_ref().is_some_and(|a| a.mode == Mode::Stunt && a.st.as_ref().is_some_and(|s| s.phase as u8 >= crate::stunt::SPhase::Man as u8)) {
             return;
         }
+        if self.show_window().is_some() {
+            return;
+        }
+        let h = &mut self.h;
         if !h.fs8 && h.fs_t8 >= 2.0 {
             h.fs8 = true;
             h.fs15 = true;
@@ -895,6 +909,30 @@ impl Sim {
                             coll_ov = Some(cc);
                         }
                     }
+                }
+            }
+        }
+        if a.mode == Mode::Show {
+            match self.show_fly(&mut a, dt) {
+                crate::show::ShowOut::Direct(mut c) => {
+                    if let (Some((mi, t0, cc)), Some(sh)) = (self.show_hook.cut, self.show.as_ref()) {
+                        if sh.man() as u8 == mi && sh.ph == crate::show::Ph::Fly && sh.t_ph >= t0 {
+                            c.coll = cc;
+                        }
+                    }
+                    self.auto = Some(a);
+                    return c;
+                }
+                crate::show::ShowOut::Guide(g) => {
+                    tx = g.tx;
+                    tz = g.tz;
+                    alt_t = g.alt_t;
+                    vmax = g.vmax;
+                    vd = g.vd;
+                    ffx = g.ff.0;
+                    ffz = g.ff.1;
+                    lim = g.lim;
+                    vz_des = g.vz;
                 }
             }
         }

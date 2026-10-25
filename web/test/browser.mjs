@@ -136,10 +136,12 @@ await page.click('#aTake');
 await page.waitForFunction(() => window.heli.frame().mode === 1, { timeout: 30000 });
 await sleep(1500);
 const bar = await page.evaluate(() => [...document.querySelectorAll('#actbar button')].map(b => b.id));
-if (bar.join() !== 'bArm,bHold,aTake,aCirc,aLand,aAuto,aStunt,bSet') fail('action bar ' + bar);
+if (bar.join() !== 'bArm,bHold,aTake,aCirc,aLand,aAuto,aStunt,aShow,bSet') fail('action bar ' + bar);
 if (!(await page.$eval('#aTake', e => e.classList.contains('on')))) fail('TAKEOFF not highlighted');
 const fits = await page.evaluate(() => [...document.querySelectorAll('#actbar button, .readouts .r')].every(b => { const r = b.getBoundingClientRect(); return r.width === 0 || (r.right <= innerWidth && b.scrollWidth <= b.clientWidth + 1); }));
 if (!fits) fail('desktop: action bar / readouts overflow');
+const barRows = await page.evaluate(() => new Set([...document.querySelectorAll('#actbar button')].map(b => Math.round(b.getBoundingClientRect().top))).size);
+if (barRows !== 1) fail('desktop: action bar wraps onto ' + barRows + ' rows');
 const ro = await page.$$eval('.readouts .r', rs => rs.filter(r => !r.hidden).map(r => r.querySelector('b').textContent));
 if (ro.join() !== 'ALT,V/S,SPEED,BATTERY') fail('core readouts ' + ro);
 ok(`TAKEOFF: hover hold, action bar ${bar.length} buttons (mode lit), readouts ${ro.join(' / ')} (headspeed hidden at ${(await fr()).rpm.toFixed(2)}), tooltips + key hints on desktop, cue "${await text('cue')}"`);
@@ -278,7 +280,7 @@ await page.close();
 // ---------------------------------------------------------------- phone portrait 390 x 844 (touch)
 const lay = async p => p.evaluate(() => {
   const r = e => e.getBoundingClientRect();
-  const btn = [...document.querySelectorAll('#actbar button')].map(r);
+  const btn = [...document.querySelectorAll('#actbar button')].filter(b => getComputedStyle(b).display !== 'none').map(r);
   const st = [...document.querySelectorAll('.stick')].map(r);
   return {
     sw: document.documentElement.scrollWidth, w: innerWidth, h: innerHeight,
@@ -322,7 +324,7 @@ await ph.close();
 const ls = await open(844, 390, true);
 await ls.click('#bGo');
 L = await lay(ls);
-if (L.sw > L.w || !L.btnIn || L.cols !== 1 || L.rows !== 8 || !L.sticks) fail('phone landscape layout ' + JSON.stringify(L));
+if (L.sw > L.w || !L.btnIn || L.cols !== 1 || L.rows !== 9 || !L.sticks) fail('phone landscape layout ' + JSON.stringify(L));
 const colW = await ls.$eval('#actbar', e => e.getBoundingClientRect().width);
 await ls.click('#aTake');
 await ls.waitForFunction(() => window.heli.frame().mode === 1, { timeout: 30000 });
@@ -330,6 +332,103 @@ await sleep(3500);
 if (shots) await ls.screenshot({ path: path.join(shots, 'phone-landscape.png') });
 ok(`phone landscape 844x390 (touch): action bar is a ${colW.toFixed(0)} px column (${L.rows} buttons, ${L.btnH.toFixed(0)} px tall), sticks in the bottom corners, no horizontal scroll`);
 await ls.close();
+
+// ---------------------------------------------------------------- SHOW (desktop, then 390 px phone)
+// Screenshots to SHOW_SHOTS (or the shots dir): show-sheet, show-trail (a manoeuvre with the smoke
+// trail and the ghost path), show-card (a result card), show-scoresheet (the final scoresheet).
+const showShots = process.env.SHOW_SHOTS || shots;
+if (showShots) fs.mkdirSync(showShots, { recursive: true });
+/** fast-forward the sim (wasm test hook sim_ff) until the frame says so, `chunk` sim seconds at a time */
+const ffUntil = async (p, cond, what, chunk = 2, maxSim = 400) => {
+  for (let t = 0; t < maxSim; t += chunk) {
+    const done = await p.evaluate(new Function('f', 'return (' + cond + ')(f)'), await p.evaluate(() => window.heli.frame()));
+    if (done) return;
+    await p.evaluate(c => window.heli.engine.ff(c), chunk);
+    await sleep(120);   // let a frame render (the frame loop builds the next JSON frame)
+  }
+  fail('SHOW: timed out waiting for ' + what);
+};
+{
+  const sp = await open(960, 600);
+  await sp.click('#bGo');
+  await sp.keyboard.press('b');
+  await sp.waitForFunction(() => !document.getElementById('showSheet').hidden, { timeout: 10000 });
+  const nFull = await sp.$$eval('#showList li', l => l.length);
+  await sp.click('#showPart button[data-part="1"]');
+  await sp.waitForFunction(() => document.querySelectorAll('#showList li').length === 5, { timeout: 10000 });
+  const sheetInfo = await sp.evaluate(() => ({
+    demo: document.getElementById('bShowDemo').classList.contains('on'), items: [...document.querySelectorAll('#showList li')].map(e => e.textContent),
+    parts: [...document.querySelectorAll('#showPart button')].map(e => e.textContent), lit: document.getElementById('aShow').classList.contains('on'),
+  }));
+  if (nFull !== 10 || !sheetInfo.demo || !sheetInfo.lit || !/Hover square/.test(sheetInfo.items[0]) || !/K 1\.0/.test(sheetInfo.items[0])) fail('SHOW sheet ' + JSON.stringify(sheetInfo) + ' full ' + nFull);
+  if (showShots) await sp.screenshot({ path: path.join(showShots, 'show-sheet.png') });
+  ok(`SHOW (B): setup sheet, ${nFull} manoeuvres in the full schedule, Hovering only -> ${sheetInfo.items.length} (${sheetInfo.items.join(' / ')}), autopilot demo selected`);
+  await sp.click('#bShowGo');
+  await sp.waitForFunction(() => window.heli.frame().show.on && !document.getElementById('showBar').hidden && document.getElementById('showSheet').hidden, { timeout: 10000 });
+  // into the square (phase 2 = flying), then run in real time so the trail draws
+  await ffUntil(sp, 'f => f.show.ph === 2', 'the hover square to start', 1);
+  await sp.evaluate(() => window.heli.engine.ff(6));
+  await sleep(4000);
+  const vd = await sp.evaluate(() => window.heli.view());
+  const bar0 = await text('showBar', sp), cue0 = await text('cue', sp);
+  if (!(vd.ghost > 20 && vd.trail > 3) || !/1\/5/.test(bar0) || !/Hover square/.test(cue0)) fail('SHOW live ' + JSON.stringify(vd) + ' bar ' + bar0 + ' cue ' + cue0);
+  if (showShots) await sp.screenshot({ path: path.join(showShots, 'show-trail.png') });
+  ok(`SHOW running: bar "${bar0}", cue "${cue0.slice(0, 80)}", ghost path ${vd.ghost} points, smoke trail ${vd.trail} points`);
+  await ffUntil(sp, 'f => !!f.show.card', 'the first result card');
+  await sp.waitForFunction(() => !document.getElementById('showCard').hidden, { timeout: 10000 });
+  const card = await sp.evaluate(() => { const c = document.getElementById('showCard'); const r = c.getBoundingClientRect(); return { t: c.textContent, s: c.querySelectorAll('.marks s').length, m: c.querySelectorAll('.marks > *').length, top: r.top, H: innerHeight, right: r.right, W: innerWidth }; });
+  if (card.s !== 2 || card.m !== 5 || !/Hover square/.test(card.t) || card.right > card.W || card.top < card.H * 0.4) fail('SHOW card ' + JSON.stringify(card));
+  if (showShots) await sp.screenshot({ path: path.join(showShots, 'show-card.png') });
+  ok(`SHOW result card: "${card.t.slice(0, 90)}", 5 marks with 2 struck through, low on the screen`);
+  await ffUntil(sp, 'f => !f.show.on && !!f.show.last && f.show.resOpen', 'the end of the hovering show', 4, 600);
+  await sp.waitForFunction(() => !document.getElementById('score').hidden && document.querySelectorAll('#scoreRows .srow').length === 5, { timeout: 10000 });
+  const sc = await sp.evaluate(() => ({ rows: document.querySelectorAll('#scoreRows .srow').length, s: document.querySelectorAll('#scoreRows .marks s').length, tot: document.getElementById('scoreTot').textContent, sub: document.getElementById('scoreSub').textContent }));
+  if (sc.rows !== 5 || sc.s !== 10 || !/%/.test(sc.tot)) fail('SHOW scoresheet ' + JSON.stringify(sc));
+  if (showShots) await sp.screenshot({ path: path.join(showShots, 'show-scoresheet.png') });
+  await sp.click('#bScoreX');
+  await sp.waitForFunction(() => document.getElementById('score').hidden, { timeout: 10000 });
+  // the last result from the settings sheet
+  await sp.click('#bSet'); await sleep(200); await settle(sp, 'sheet');
+  const lastV = await text('bScoreRowV', sp);
+  await sp.click('#bScoreRow');
+  await sp.waitForFunction(() => !document.getElementById('score').hidden, { timeout: 10000 });
+  await sp.keyboard.press('Escape');
+  await sp.waitForFunction(() => document.getElementById('score').hidden, { timeout: 10000 });
+  ok(`SHOW scoresheet: ${sc.rows} rows, ${sc.s} dropped marks struck, total "${sc.tot}" (${sc.sub}); LAST SHOW ${lastV} in the settings reopens it, Esc closes`);
+  await sp.close();
+}
+{
+  const pp = await open(390, 844, true);
+  await pp.click('#bGo');
+  L = await lay(pp);
+  if (L.sw > L.w || !L.btnIn || L.rows !== 1 || L.btnH < 40) fail('phone layout with SHOW ' + JSON.stringify(L));
+  // the portrait bar is full: SHOW is in the settings sheet
+  if (!(await hidden('aShow', pp))) fail('phone portrait: SHOW should move to the settings sheet');
+  await pp.tap('#bSet'); await sleep(300); await settle(pp, 'sheet');
+  await pp.tap('#bShowRow');
+  await pp.waitForFunction(() => !document.getElementById('showSheet').hidden && document.getElementById('sheet').hidden, { timeout: 10000 });
+  const fit = () => pp.evaluate(() => {
+    const vis = [...document.querySelectorAll('#showSheet, #showBar, #showCard, #score .card')].filter(e => !e.hidden && e.offsetParent !== null);
+    return { sw: document.documentElement.scrollWidth, app: document.getElementById('app').scrollWidth, W: innerWidth, out: vis.filter(e => { const r = e.getBoundingClientRect(); return r.left < -1 || r.right > innerWidth + 1; }).map(e => e.id || e.className) };
+  });
+  let F = await fit();
+  if (F.sw > F.W || F.out.length) fail('phone SHOW sheet fit ' + JSON.stringify(F));
+  if (showShots) await pp.screenshot({ path: path.join(showShots, 'phone-show-sheet.png') });
+  await pp.tap('#showPart button[data-part="1"]');
+  await pp.tap('#bShowGo');
+  await ffUntil(pp, 'f => !!f.show.card', 'a result card on the phone');
+  await pp.waitForFunction(() => !document.getElementById('showCard').hidden, { timeout: 10000 });
+  F = await fit();
+  if (F.sw > F.W || F.out.length) fail('phone SHOW card fit ' + JSON.stringify(F));
+  if (showShots) await pp.screenshot({ path: path.join(showShots, 'phone-show-card.png') });
+  await ffUntil(pp, 'f => !f.show.on && !!f.show.last && f.show.resOpen', 'the end of the show on the phone', 4, 600);
+  await pp.waitForFunction(() => !document.getElementById('score').hidden, { timeout: 10000 });
+  F = await fit();
+  if (F.sw > F.W || F.app > F.W || F.out.length) fail('phone scoresheet fit ' + JSON.stringify(F));
+  if (showShots) await pp.screenshot({ path: path.join(showShots, 'phone-show-scoresheet.png') });
+  ok(`SHOW on a 390 px phone: SHOW in the settings sheet (the bar keeps its 8 buttons), setup sheet, result card and scoresheet within the width, no horizontal scroll (${F.sw} px)`);
+  await pp.close();
+}
 
 await browser.close();
 if (errors.length) fail(errors.join('\n'));

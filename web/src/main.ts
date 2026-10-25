@@ -7,7 +7,7 @@ import { Input } from './input';
 import { View3D } from './view3d';
 import { Hud } from './hud';
 
-declare global { interface Window { HELI_WASM: string; heli?: { engine: Engine; frame: () => Frame | null; errors: string[] } } }
+declare global { interface Window { HELI_WASM: string; heli?: { engine: Engine; frame: () => Frame | null; errors: string[]; view?: () => { trail: number; ghost: number } } } }
 
 const DT = 1 / 240, MAX_STEPS = 24;
 const $ = (id: string) => document.getElementById(id)!;
@@ -19,7 +19,7 @@ async function start() {
   const keyCmd: Record<string, number> = {
     t: Cmd.Takeoff, k: Cmd.Circuit, g: Cmd.Land, u: Cmd.Autorot, ' ': Cmd.Arm, r: Cmd.Reset, c: Cmd.Cam, h: Cmd.Hold,
     l: Cmd.Level, p: Cmd.Pitch, n: Cmd.Wind, x: Cmd.Protect, m: Cmd.Sensors, e: Cmd.Estimator, j: Cmd.Stunts,
-    q: Cmd.AltHold, y: Cmd.AutoYaw, v: Cmd.TailRate,
+    q: Cmd.AltHold, y: Cmd.AutoYaw, v: Cmd.TailRate, b: Cmd.Show,
   };
   let frame: Frame | null = null;
   // stunt picker keys while it is open: 1-5, arrows + Enter, Esc
@@ -39,12 +39,20 @@ async function start() {
     $('bSet').classList.toggle('on', on); $('bSet').setAttribute('aria-expanded', String(on));
     if (on) ($('bSetX') as HTMLElement).focus({ preventScroll: true }); else if (document.activeElement && sheet.contains(document.activeElement)) ($('bSet') as HTMLElement).focus({ preventScroll: true });
   };
-  const sheetKey = (k: string): boolean => { if (k === 'escape' && !sheet.hidden) { setOpen(false); return true; } return false; };
+  const sheetKey = (k: string): boolean => {
+    if (k !== 'escape') return false;
+    if (!sheet.hidden) { setOpen(false); return true; }
+    if (frame && frame.show.resOpen) { send(Cmd.ShowResults); return true; }
+    if (frame && frame.show.sheet) { send(Cmd.ShowClose); return true; }
+    return false;
+  };
   const input = new Input(send, k => { if (sheetKey(k) || pickerKey(k)) return; if (k in keyCmd) send(keyCmd[k]); }, () => !!(frame && frame.picker));
   const buttons: Record<string, number> = {
     aTake: Cmd.Takeoff, aCirc: Cmd.Circuit, aLand: Cmd.Land, aAuto: Cmd.Autorot, aStunt: Cmd.Stunts, bArm: Cmd.Arm, bHold: Cmd.Hold,
     bProt: Cmd.Protect, bSens: Cmd.Sensors, bEst: Cmd.Estimator, bLvl: Cmd.Level, bPitch: Cmd.Pitch, bWind: Cmd.Wind, bCam: Cmd.Cam, bReset: Cmd.Reset,
     bAlt: Cmd.AltHold, bYaw: Cmd.AutoYaw, bTail: Cmd.TailRate, bPip: Cmd.CamView,
+    aShow: Cmd.Show, bShowX: Cmd.ShowClose, bShowDemo: Cmd.ShowDemo, bShowMan: Cmd.ShowManual, bShowGo: Cmd.ShowStart,
+    bShowDone: Cmd.ShowDone, bShowStop: Cmd.ShowStop, bScoreX: Cmd.ShowResults,
   };
   for (const [id, c] of Object.entries(buttons)) $(id).onclick = () => send(c);
   $('bSet').onclick = () => setOpen(sheet.hidden);
@@ -60,11 +68,19 @@ async function start() {
     if (b && !b.disabled) send(Cmd.StuntFirst + Number(b.dataset.id));
   });
   $('bHelp').onclick = () => { setOpen(false); $('help').hidden = false; };
+  // SHOW from the settings sheet (the action bar button is the same command), the last scoresheet
+  $('bShowRow').onclick = () => { setOpen(false); if (!(frame && frame.show.sheet)) send(Cmd.Show); };
+  $('bScoreRow').onclick = () => { setOpen(false); if (!(frame && frame.show.resOpen)) send(Cmd.ShowResults); };
+  $('showPart').addEventListener('click', e => {
+    const b = (e.target as HTMLElement).closest('button[data-part]') as HTMLButtonElement | null;
+    if (b) send(Cmd.ShowFull + Number(b.dataset.part));
+  });
   $('bGo').onclick = () => { $('help').hidden = true; };
 
   const view = new View3D($('gl'));
   let last = performance.now(), acc = 0;
-  window.heli = { engine, frame: () => frame, errors: [] };
+  window.heli = { engine, frame: () => frame, errors: [], view: () => view.debug() };
+  view.onLost = () => engine.ghostReset();
   window.addEventListener('resize', () => view.resize());
   // #app clips its overflow, but focus or a sliding panel could still scroll it sideways
   const app = $('app'); app.addEventListener('scroll', () => { if (app.scrollLeft || app.scrollTop) app.scrollLeft = app.scrollTop = 0; });
